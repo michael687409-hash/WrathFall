@@ -1,0 +1,364 @@
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="WrathFall" Width="1080" Height="742" MinWidth="800" MinHeight="600"
+        Background="#111113" Foreground="#F8F2F0" FontFamily="Segoe UI Variable Text, Segoe UI"
+        FontSize="14" TextOptions.TextFormattingMode="Display" UseLayoutRounding="True">
+  <Window.Resources>
+    <SolidColorBrush x:Key="Muted" Color="#BEB8B8"/>
+    <SolidColorBrush x:Key="Outline" Color="#393030"/>
+    <SolidColorBrush x:Key="Accent" Color="#FF786B"/>
+    <Style TargetType="TextBlock"><Setter Property="TextWrapping" Value="Wrap"/></Style>
+    <Style x:Key="Title" TargetType="TextBlock">
+      <Setter Property="FontSize" Value="29"/><Setter Property="FontWeight" Value="SemiBold"/>
+      <Setter Property="Margin" Value="0,0,0,12"/>
+    </Style>
+    <Style x:Key="Card" TargetType="Border">
+      <Setter Property="Background" Value="#D0181616"/><Setter Property="BorderBrush" Value="{StaticResource Outline}"/>
+      <Setter Property="BorderThickness" Value="1"/><Setter Property="CornerRadius" Value="10"/>
+      <Setter Property="Padding" Value="18"/>
+    </Style>
+    <Style TargetType="Button">
+      <Setter Property="Background" Value="#D0252121"/><Setter Property="Foreground" Value="#F8F2F0"/>
+      <Setter Property="BorderBrush" Value="{StaticResource Outline}"/><Setter Property="Padding" Value="13,8"/>
+      <Setter Property="MinHeight" Value="36"/><Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Button">
+            <Border x:Name="Surface" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}"
+                    BorderThickness="1" CornerRadius="7" Padding="{TemplateBinding Padding}">
+              <ContentPresenter HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
+                                VerticalAlignment="Center" RecognizesAccessKey="True"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="Surface" Property="BorderBrush" Value="#D65A52"/></Trigger>
+              <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="Surface" Property="BorderBrush" Value="#FFA497"/></Trigger>
+              <Trigger Property="IsPressed" Value="True"><Setter TargetName="Surface" Property="Opacity" Value="0.74"/></Trigger>
+              <Trigger Property="IsEnabled" Value="False"><Setter TargetName="Surface" Property="Opacity" Value="0.43"/></Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+    <Style x:Key="Navigation" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
+      <Setter Property="HorizontalContentAlignment" Value="Left"/><Setter Property="Background" Value="Transparent"/>
+      <Setter Property="BorderBrush" Value="Transparent"/><Setter Property="Margin" Value="0,0,0,6"/>
+      <Style.Triggers>
+        <Trigger Property="Tag" Value="active">
+          <Setter Property="Background" Value="#3A201F"/><Setter Property="BorderBrush" Value="#763730"/>
+          <Setter Property="Foreground" Value="#FFB3AA"/><Setter Property="FontWeight" Value="SemiBold"/>
+        </Trigger>
+      </Style.Triggers>
+    </Style>
+    <Style x:Key="PlayButton" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
+      <Setter Property="Background" Value="#F25349"/><Setter Property="BorderBrush" Value="#FF796B"/>
+      <Setter Property="Foreground" Value="#1B0B09"/><Setter Property="FontSize" Value="18"/>
+      <Setter Property="FontWeight" Value="Bold"/><Setter Property="Height" Value="48"/>
+      <Setter Property="MinWidth" Value="138"/>
+    </Style>
+    <Style x:Key="BuildButton" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
+      <Style.Triggers>
+        <Trigger Property="Tag" Value="installed">
+          <Setter Property="Foreground" Value="#ECFFF5"/>
+          <Setter Property="Template"><Setter.Value>
+            <ControlTemplate TargetType="Button">
+              <Border BorderBrush="#609A80" BorderThickness="1" CornerRadius="7" Padding="14,8">
+                <Border.Background><LinearGradientBrush StartPoint="0,1" EndPoint="1,0">
+                  <GradientStop Color="#253D31" Offset="0"/><GradientStop Color="#38604A" Offset=".62"/>
+                  <GradientStop Color="#295544" Offset="1"/>
+                </LinearGradientBrush></Border.Background>
+                <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+              </Border>
+            </ControlTemplate>
+          </Setter.Value></Setter>
+        </Trigger>
+      </Style.Triggers>
+    </Style>
+    <Style TargetType="Label">
+      <Setter Property="Foreground" Value="{StaticResource Muted}"/><Setter Property="Padding" Value="0"/>
+      <Setter Property="FontSize" Value="13"/><Setter Property="Margin" Value="0,0,0,5"/>
+    </Style>
+    <Style TargetType="ComboBoxItem">
+      <Setter Property="Foreground" Value="#F8F2F0"/><Setter Property="Padding" Value="10,8"/>
+      <Setter Property="Template"><Setter.Value>
+        <ControlTemplate TargetType="ComboBoxItem">
+          <Border x:Name="ItemSurface" Background="Transparent" Padding="{TemplateBinding Padding}">
+            <ContentPresenter/>
+          </Border>
+          <ControlTemplate.Triggers>
+            <Trigger Property="IsHighlighted" Value="True"><Setter TargetName="ItemSurface" Property="Background" Value="#432621"/></Trigger>
+            <Trigger Property="IsSelected" Value="True"><Setter TargetName="ItemSurface" Property="Background" Value="#532A24"/></Trigger>
+          </ControlTemplate.Triggers>
+        </ControlTemplate>
+      </Setter.Value></Setter>
+    </Style>
+    <Style TargetType="ComboBox">
+      <Setter Property="Foreground" Value="#F8F2F0"/><Setter Property="Height" Value="36"/>
+      <Setter Property="Template"><Setter.Value>
+        <ControlTemplate TargetType="ComboBox">
+          <Grid>
+            <ToggleButton Focusable="False" ClickMode="Press"
+                          IsChecked="{Binding IsDropDownOpen, RelativeSource={RelativeSource TemplatedParent}, Mode=TwoWay}">
+              <ToggleButton.Template><ControlTemplate TargetType="ToggleButton">
+                <Border x:Name="ToggleSurface" CornerRadius="6" Background="#201B1B" BorderBrush="#51403C" BorderThickness="1">
+                  <Path Data="M 0 0 L 5 5 L 10 0" Stroke="#F2A69A" StrokeThickness="1.5"
+                        HorizontalAlignment="Right" VerticalAlignment="Center" Margin="0,0,12,0"/>
+                </Border>
+                <ControlTemplate.Triggers>
+                  <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="ToggleSurface" Property="BorderBrush" Value="#D65A52"/></Trigger>
+                </ControlTemplate.Triggers>
+              </ControlTemplate></ToggleButton.Template>
+            </ToggleButton>
+            <ContentPresenter IsHitTestVisible="False" Margin="10,0,31,0" VerticalAlignment="Center"
+                              Content="{TemplateBinding SelectionBoxItem}"
+                              ContentTemplate="{TemplateBinding SelectionBoxItemTemplate}"/>
+            <Popup x:Name="PART_Popup" Placement="Bottom" IsOpen="{TemplateBinding IsDropDownOpen}" AllowsTransparency="True">
+              <Border Background="#201B1B" BorderBrush="#604540" BorderThickness="1" CornerRadius="5"
+                      MinWidth="{Binding ActualWidth, RelativeSource={RelativeSource TemplatedParent}}">
+                <ScrollViewer MaxHeight="260"><ItemsPresenter/></ScrollViewer>
+              </Border>
+            </Popup>
+          </Grid>
+          <ControlTemplate.Triggers>
+            <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.45"/></Trigger>
+          </ControlTemplate.Triggers>
+        </ControlTemplate>
+      </Setter.Value></Setter>
+    </Style>
+    <Style TargetType="CheckBox">
+      <Setter Property="Foreground" Value="#F8F2F0"/><Setter Property="VerticalContentAlignment" Value="Center"/>
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="Template"><Setter.Value>
+        <ControlTemplate TargetType="CheckBox">
+          <StackPanel x:Name="CheckSurface" Orientation="Horizontal" Background="Transparent">
+            <Border x:Name="CheckFrame" Width="17" Height="17" CornerRadius="4" Margin="0,0,7,0"
+                    BorderThickness="1" BorderBrush="#786663" Background="#211919" VerticalAlignment="Center">
+              <Path x:Name="Tick" Data="M 0 3 L 3 6 L 8 0" Stroke="#1B0B09" StrokeThickness="1.7"
+                    HorizontalAlignment="Center" VerticalAlignment="Center" Visibility="Collapsed"/>
+            </Border>
+            <ContentPresenter VerticalAlignment="{TemplateBinding VerticalContentAlignment}" RecognizesAccessKey="True"/>
+          </StackPanel>
+          <ControlTemplate.Triggers>
+            <Trigger Property="IsChecked" Value="True">
+              <Setter TargetName="CheckFrame" Property="Background" Value="#F25349"/>
+              <Setter TargetName="Tick" Property="Visibility" Value="Visible"/>
+            </Trigger>
+            <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="CheckFrame" Property="BorderBrush" Value="#FF796B"/></Trigger>
+            <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="CheckFrame" Property="BorderBrush" Value="#FFA497"/></Trigger>
+            <Trigger Property="IsEnabled" Value="False"><Setter TargetName="CheckSurface" Property="Opacity" Value=".45"/></Trigger>
+          </ControlTemplate.Triggers>
+        </ControlTemplate>
+      </Setter.Value></Setter>
+    </Style>
+    <Style x:Key="ScrollHitArea" TargetType="RepeatButton">
+      <Setter Property="Focusable" Value="False"/>
+      <Setter Property="Template"><Setter.Value>
+        <ControlTemplate TargetType="RepeatButton"><Border Background="Transparent"/></ControlTemplate>
+      </Setter.Value></Setter>
+    </Style>
+    <Style TargetType="ScrollBar">
+      <Setter Property="Width" Value="12"/>
+      <Setter Property="Template"><Setter.Value>
+        <ControlTemplate TargetType="ScrollBar">
+          <Border Background="#161313" Padding="3,1">
+            <Track x:Name="PART_Track" IsDirectionReversed="True">
+              <Track.DecreaseRepeatButton><RepeatButton x:Name="ScrollBack" Command="ScrollBar.PageUpCommand" Style="{StaticResource ScrollHitArea}"/></Track.DecreaseRepeatButton>
+              <Track.Thumb>
+                <Thumb>
+                  <Thumb.Template><ControlTemplate TargetType="Thumb">
+                    <Border x:Name="ThumbSurface" CornerRadius="3" Background="#604540"/>
+                    <ControlTemplate.Triggers>
+                      <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="ThumbSurface" Property="Background" Value="#996057"/></Trigger>
+                    </ControlTemplate.Triggers>
+                  </ControlTemplate></Thumb.Template>
+                </Thumb>
+              </Track.Thumb>
+              <Track.IncreaseRepeatButton><RepeatButton x:Name="ScrollForward" Command="ScrollBar.PageDownCommand" Style="{StaticResource ScrollHitArea}"/></Track.IncreaseRepeatButton>
+            </Track>
+          </Border>
+          <ControlTemplate.Triggers>
+            <Trigger Property="Orientation" Value="Horizontal">
+              <Setter Property="Width" Value="Auto"/><Setter Property="Height" Value="12"/>
+              <Setter TargetName="PART_Track" Property="IsDirectionReversed" Value="False"/>
+              <Setter TargetName="ScrollBack" Property="Command" Value="ScrollBar.PageLeftCommand"/>
+              <Setter TargetName="ScrollForward" Property="Command" Value="ScrollBar.PageRightCommand"/>
+            </Trigger>
+          </ControlTemplate.Triggers>
+        </ControlTemplate>
+      </Setter.Value></Setter>
+    </Style>
+  </Window.Resources>
+
+  <Grid>
+    <Grid.ColumnDefinitions><ColumnDefinition Width="182"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+    <Grid.RowDefinitions><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+    <Border x:Name="Backdrop" Grid.ColumnSpan="2" Grid.RowSpan="2" Background="#181112"/>
+    <Border Grid.ColumnSpan="2" Grid.RowSpan="2" IsHitTestVisible="False">
+      <Border.Background>
+        <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
+          <GradientStop Color="#800C0909" Offset="0"/><GradientStop Color="#220C0909" Offset=".6"/><GradientStop Color="#340C0909" Offset="1"/>
+        </LinearGradientBrush>
+      </Border.Background>
+    </Border>
+    <Border Background="#D5151313" BorderBrush="{StaticResource Outline}" BorderThickness="0,0,1,0">
+      <DockPanel Margin="16,25,16,18">
+        <TextBlock DockPanel.Dock="Top" Text="WrathFall" FontSize="22" FontWeight="SemiBold" Margin="7,5,0,29"/>
+        <StackPanel DockPanel.Dock="Bottom">
+          <Button x:Name="ProjectFolder" Content="Project folder" Style="{StaticResource Navigation}"/>
+          <Button x:Name="OpenLogs" Content="Logs" Style="{StaticResource Navigation}"/>
+        </StackPanel>
+        <StackPanel>
+          <Button x:Name="NavPlay" Content="Play" Style="{StaticResource Navigation}"/>
+          <Button x:Name="NavSetup" Content="Game files" Style="{StaticResource Navigation}"/>
+          <Button x:Name="NavGraphics" Content="Graphics" Style="{StaticResource Navigation}"/>
+          <Button x:Name="NavAchievements" Content="Achievements" Style="{StaticResource Navigation}"/>
+        </StackPanel>
+      </DockPanel>
+    </Border>
+
+    <Grid Grid.Column="1" Margin="25,24,25,18">
+      <Grid x:Name="PlayPage">
+        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+        <Border Style="{StaticResource Card}" Padding="22" Margin="0,0,0,16">
+          <StackPanel>
+            <TextBlock x:Name="PlayHeading" Style="{StaticResource Title}" FontSize="34" Margin="0,0,0,6"/>
+            <TextBlock x:Name="BuildState" Foreground="{StaticResource Muted}" Margin="0,0,0,18"/>
+            <WrapPanel>
+              <Button x:Name="GoSetup" Content="Manage game files" Margin="0,0,9,7"/>
+              <Button x:Name="BuildPc" Content="Build" Style="{StaticResource BuildButton}" MinWidth="115" Margin="0,0,9,7"/>
+              <Button x:Name="PrepareShaders" Content="Precompile Shaders" Margin="0,0,0,7"/>
+            </WrapPanel>
+            <TextBlock x:Name="CacheState" Foreground="{StaticResource Muted}" Margin="0,3,0,0" FontSize="12"/>
+          </StackPanel>
+        </Border>
+        <Border Grid.Row="1" Style="{StaticResource Card}" Background="#B01A1717" Padding="15">
+          <DockPanel>
+            <TextBlock Text="Activity" DockPanel.Dock="Top" FontSize="16" FontWeight="SemiBold" Margin="0,0,0,10"/>
+            <TextBox x:Name="OutputLog" IsReadOnly="True" AutomationProperties.Name="Activity log"
+                     Background="#95121111" Foreground="#E3D7D4" BorderThickness="0" FontFamily="Consolas"
+                     FontSize="12" Padding="9" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto"
+                     Text="Build, import, and game output will appear here."/>
+          </DockPanel>
+        </Border>
+      </Grid>
+
+      <ScrollViewer x:Name="SetupPage" VerticalScrollBarVisibility="Auto" Visibility="Collapsed">
+        <StackPanel>
+          <TextBlock Text="Game files" Style="{StaticResource Title}"/>
+          <Border Style="{StaticResource Card}" Margin="0,0,0,10">
+            <DockPanel>
+              <Button x:Name="ChooseDisc" Content="Choose disc…" DockPanel.Dock="Right" Margin="15,0,0,0"/>
+              <StackPanel><TextBlock Text="Xbox 360 disc" FontWeight="SemiBold"/><TextBlock x:Name="DiscState" Foreground="{StaticResource Muted}" Margin="0,4,0,0"/></StackPanel>
+            </DockPanel>
+          </Border>
+          <Border Style="{StaticResource Card}" Margin="0,0,0,10">
+            <DockPanel>
+              <Button x:Name="ChooseUpdate" Content="Choose TU1…" DockPanel.Dock="Right" Margin="15,0,0,0"/>
+              <StackPanel><TextBlock Text="Title update" FontWeight="SemiBold"/><TextBlock x:Name="UpdateState" Foreground="{StaticResource Muted}" Margin="0,4,0,0"/></StackPanel>
+            </DockPanel>
+          </Border>
+          <Border Style="{StaticResource Card}" Margin="0,0,0,10">
+            <DockPanel>
+              <Button x:Name="ChooseDlc" Content="Add DLC…" DockPanel.Dock="Right" Margin="15,0,0,0"/>
+              <StackPanel><TextBlock Text="Downloadable content" FontWeight="SemiBold"/><TextBlock x:Name="DlcState" Foreground="{StaticResource Muted}" Margin="0,4,0,0"/><TextBlock Text="Place unpacked Xbox content packages in local\dlc." Foreground="{StaticResource Muted}" FontSize="12" Margin="0,5,0,0"/></StackPanel>
+            </DockPanel>
+          </Border>
+
+        </StackPanel>
+      </ScrollViewer>
+
+      <ScrollViewer x:Name="GraphicsPage" VerticalScrollBarVisibility="Auto" Visibility="Collapsed">
+        <StackPanel>
+          <DockPanel Margin="0,0,0,12">
+            <Button x:Name="ResetGraphics" Content="Reset graphics" DockPanel.Dock="Right" Margin="10,0,0,0"/>
+            <TextBlock Text="Graphics" Style="{StaticResource Title}" Margin="0" VerticalAlignment="Center"/>
+          </DockPanel>
+          <Border Style="{StaticResource Card}">
+            <StackPanel>
+              <Grid>
+                <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="17"/><ColumnDefinition/></Grid.ColumnDefinitions>
+                <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                <StackPanel Margin="0,0,0,14"><Label Content="Renderer" Target="{Binding ElementName=Renderer}"/><ComboBox x:Name="Renderer"/></StackPanel>
+                <StackPanel Grid.Column="2" Margin="0,0,0,14"><Label Content="Frame rate" Target="{Binding ElementName=FrameRate}"/><ComboBox x:Name="FrameRate" ToolTip="VSync can limit presentation to the display refresh rate."/></StackPanel>
+                <StackPanel Grid.Row="1" Margin="0,0,0,14"><Label Content="Display mode" Target="{Binding ElementName=DisplayMode}"/><ComboBox x:Name="DisplayMode"/></StackPanel>
+                <StackPanel Grid.Row="1" Grid.Column="2" Margin="0,0,0,14"><Label Content="Display monitor" Target="{Binding ElementName=DisplayMonitor}"/><ComboBox x:Name="DisplayMonitor"/></StackPanel>
+                <StackPanel Grid.Row="2" Margin="0,0,0,14"><Label Content="Output resolution" Target="{Binding ElementName=Resolution}"/><ComboBox x:Name="Resolution" ToolTip="Borderless windowed follows the selected monitor’s desktop resolution." ToolTipService.ShowOnDisabled="True"/></StackPanel>
+                <StackPanel Grid.Row="2" Grid.Column="2" Margin="0,0,0,14"><Label Content="Texture filtering" Target="{Binding ElementName=TextureFiltering}"/><ComboBox x:Name="TextureFiltering"/></StackPanel>
+                <StackPanel Grid.Row="3">
+                  <StackPanel x:Name="UpscalerPanel" Visibility="Collapsed">
+                    <Label Content="Upscaler" Target="{Binding ElementName=Upscaler}"/>
+                    <ComboBox x:Name="Upscaler" ToolTip="Upscales the original 720p scene to 1440p."/>
+                  </StackPanel>
+                  <StackPanel x:Name="ModelPanel" Margin="0,10,0,0" Visibility="Collapsed">
+                    <Label Content="DLSS model preset" Target="{Binding ElementName=DlssPreset}"/><ComboBox x:Name="DlssPreset"/>
+                  </StackPanel>
+                  <StackPanel x:Name="AaPanel">
+                    <Label Content="Anti-aliasing" Target="{Binding ElementName=AntiAliasing}"/><ComboBox x:Name="AntiAliasing"/>
+                    <Border x:Name="NativeAa" Visibility="Collapsed" Background="#201B1B" BorderBrush="#51403C" BorderThickness="1" CornerRadius="6" Height="36" Padding="10,0">
+                      <TextBlock Text="FXAA High" VerticalAlignment="Center"/>
+                    </Border>
+                  </StackPanel>
+                </StackPanel>
+              </Grid>
+              <WrapPanel Margin="0,18,0,3">
+                <CheckBox x:Name="VSync" Content="VSync" Margin="0,0,18,8"/>
+              </WrapPanel>
+            </StackPanel>
+          </Border>
+          <Border x:Name="DlssSetup" Visibility="Collapsed" Style="{StaticResource Card}" Margin="0,12,0,0">
+            <StackPanel>
+              <TextBlock Text="NVIDIA DLSS setup" FontWeight="SemiBold" FontSize="17"/>
+              <TextBlock Text="Download NVIDIA Streamline 2.14.16 for Windows x64, then import the ZIP to enable DLSS." Foreground="{StaticResource Muted}" Margin="0,6,0,12"/>
+              <WrapPanel>
+                <Button x:Name="DownloadDlss" Content="Download from NVIDIA" Margin="0,0,8,6"/>
+                <Button x:Name="ImportDlss" Content="Install Streamline…" Margin="0,0,0,6"/>
+              </WrapPanel>
+            </StackPanel>
+          </Border>
+        </StackPanel>
+      </ScrollViewer>
+
+      <Grid x:Name="AchievementsPage" Visibility="Collapsed">
+        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+        <DockPanel Margin="0,0,0,15">
+          <Button x:Name="LoadAchievements" Content="Refresh" DockPanel.Dock="Right" Margin="10,0,0,0" VerticalAlignment="Top"/>
+          <StackPanel><TextBlock Text="Achievements" Style="{StaticResource Title}" Margin="0"/><TextBlock x:Name="AchievementSummary" Foreground="{StaticResource Accent}" Margin="0,4,0,0"/></StackPanel>
+        </DockPanel>
+        <ListBox Grid.Row="1" x:Name="AchievementList" Background="#C0181616" BorderBrush="{StaticResource Outline}"
+                 Foreground="#F8F2F0" ScrollViewer.HorizontalScrollBarVisibility="Disabled" AutomationProperties.Name="Achievements">
+          <ListBox.ItemContainerStyle><Style TargetType="ListBoxItem"><Setter Property="HorizontalContentAlignment" Value="Stretch"/><Setter Property="Foreground" Value="#F8F2F0"/></Style></ListBox.ItemContainerStyle>
+          <ListBox.ItemTemplate>
+            <DataTemplate>
+              <Border BorderBrush="#393030" BorderThickness="0,0,0,1" Padding="10">
+                <Grid>
+                  <Grid.ColumnDefinitions><ColumnDefinition Width="48"/><ColumnDefinition/><ColumnDefinition Width="85"/></Grid.ColumnDefinitions>
+                  <Image Source="{Binding Icon}" Width="37" Height="37" HorizontalAlignment="Left"/>
+                  <StackPanel Grid.Column="1" Margin="0,0,12,0"><TextBlock Text="{Binding Title}" FontWeight="SemiBold"/><TextBlock Text="{Binding Description}" Foreground="#BEB8B8" Margin="0,3,0,0"/></StackPanel>
+                  <StackPanel Grid.Column="2"><TextBlock Text="{Binding State}" Foreground="#F2A69A" TextAlignment="Right"/><TextBlock Text="{Binding Score}" Foreground="#BEB8B8" TextAlignment="Right"/></StackPanel>
+                </Grid>
+              </Border>
+            </DataTemplate>
+          </ListBox.ItemTemplate>
+        </ListBox>
+      </Grid>
+    </Grid>
+
+    <Border Grid.Row="1" Grid.ColumnSpan="2" Background="#EA1A161A" BorderBrush="{StaticResource Outline}" BorderThickness="0,1,0,0" Padding="19,12">
+      <DockPanel>
+        <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+          <CheckBox x:Name="Collector" Content="Gameplay collector" Margin="0,0,17,0"
+                    ToolTip="Start the collector with the game. Press L in the game to mark a visual issue."/>
+          <Button x:Name="Play" AutomationProperties.Name="Play" Style="{StaticResource PlayButton}">
+            <StackPanel Orientation="Horizontal">
+              <Path Data="M 0 0 L 11 7 L 0 14 Z" Fill="#1B0B09" VerticalAlignment="Center" Margin="0,0,9,0"/>
+              <TextBlock Text="Play"/>
+            </StackPanel>
+          </Button>
+        </StackPanel>
+        <StackPanel VerticalAlignment="Center" Margin="0,0,12,0">
+          <TextBlock x:Name="Status" FontWeight="SemiBold"/>
+          <TextBlock x:Name="StatusDetail" Foreground="{StaticResource Muted}" FontSize="12" Margin="0,3,0,0"/>
+        </StackPanel>
+      </DockPanel>
+    </Border>
+  </Grid>
+</Window>

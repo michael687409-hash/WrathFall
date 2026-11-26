@@ -1,0 +1,3 @@
+#include "wrathfall_icon.h"
+
+WRATHFALL_ICON ICON "Launcher.ico"

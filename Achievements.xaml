@@ -1,0 +1,63 @@
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Achievements · Asura’s Wrath" Width="640" Height="630" MinWidth="450" MinHeight="350"
+        ShowInTaskbar="False" WindowStartupLocation="CenterOwner"
+        Background="#0C0C0D" Foreground="#F5F3F3" FontFamily="Segoe UI" FontSize="14">
+  <Grid Margin="24">
+    <Grid.RowDefinitions>
+      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="*"/>
+      <RowDefinition Height="Auto"/>
+    </Grid.RowDefinitions>
+    <StackPanel Margin="0,0,0,16">
+      <TextBlock Text="Achievements" FontSize="27" FontWeight="SemiBold"/>
+      <TextBlock Text="{Binding Summary}" Foreground="#FF727A" Margin="0,5,0,0"/>
+    </StackPanel>
+    <ListBox Grid.Row="1" ItemsSource="{Binding Rows}" Background="#191719" Foreground="#F5F3F3"
+             BorderBrush="#343032" BorderThickness="1" ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+             AutomationProperties.Name="Achievement list">
+      <ListBox.ItemContainerStyle>
+        <Style TargetType="ListBoxItem">
+          <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+          <Setter Property="Foreground" Value="#F5F3F3"/>
+        </Style>
+      </ListBox.ItemContainerStyle>
+      <ListBox.ItemTemplate>
+        <DataTemplate>
+          <Border BorderBrush="#343032" BorderThickness="0,0,0,1" Padding="10">
+            <Grid>
+              <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="48"/>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+              </Grid.ColumnDefinitions>
+              <Image Source="{Binding Icon}" Width="40" Height="40" HorizontalAlignment="Left"/>
+              <StackPanel Grid.Column="1" Margin="4,0,14,0">
+                <TextBlock Text="{Binding Title}" FontWeight="SemiBold" TextWrapping="Wrap"/>
+                <TextBlock Text="{Binding Description}" Foreground="#BDB6B7"
+                           TextWrapping="Wrap" Margin="0,3,0,0"/>
+              </StackPanel>
+              <StackPanel Grid.Column="2" HorizontalAlignment="Right">
+                <TextBlock Text="{Binding State}" TextAlignment="Right">
+                  <TextBlock.Style>
+                    <Style TargetType="TextBlock">
+                      <Setter Property="Foreground" Value="#BDB6B7"/>
+                      <Style.Triggers>
+                        <DataTrigger Binding="{Binding Unlocked}" Value="True">
+                          <Setter Property="Foreground" Value="#FFA0AA"/>
+                        </DataTrigger>
+                      </Style.Triggers>
+                    </Style>
+                  </TextBlock.Style>
+                </TextBlock>
+                <TextBlock Text="{Binding Score}" Foreground="#BDB6B7" TextAlignment="Right" Margin="0,3,0,0"/>
+              </StackPanel>
+            </Grid>
+          </Border>
+        </DataTemplate>
+      </ListBox.ItemTemplate>
+    </ListBox>
+    <Button Grid.Row="2" Content="Close" IsCancel="True" Padding="16,6"
+            HorizontalAlignment="Right" Margin="0,14,0,0"/>
+  </Grid>
+</Window>
