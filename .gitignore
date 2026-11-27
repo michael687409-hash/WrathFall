@@ -1,0 +1,6 @@
+/.tools/
+/local/
+/generated/
+/out/
+/userdata/
+/userdata.pending.*/
