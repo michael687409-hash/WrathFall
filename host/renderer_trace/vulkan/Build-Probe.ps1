@@ -2,7 +2,8 @@ param(
     [Parameter(Mandatory)][string] $VulkanInclude,
     [Parameter(Mandatory)][string] $OutputDirectory,
     [string] $ProjectRoot = (Join-Path $PSScriptRoot '../../..'),
-    [string] $Dxc
+    [string] $Dxc,
+    [string] $GlslangValidator
 )
 
 $ErrorActionPreference = 'Stop'
@@ -20,6 +21,7 @@ foreach ($header in @("$VulkanInclude/vulkan/vulkan.h", "$fsr/api/include/vk/ffx
 }
 $compiler = (Get-Command cl.exe -ErrorAction Stop).Source
 if ($Dxc) { $Dxc = (Get-Command $Dxc -ErrorAction Stop).Source }
+if ($GlslangValidator) { $GlslangValidator = (Get-Command $GlslangValidator -ErrorAction Stop).Source }
 $null = New-Item -ItemType Directory -Path $OutputDirectory -Force
 $output = (Resolve-Path -LiteralPath $OutputDirectory).Path
 Push-Location $output
@@ -33,6 +35,10 @@ try {
     )
     & $compiler @compileArgs
     if ($LASTEXITCODE -ne 0) { throw "Probe compilation failed ($LASTEXITCODE)" }
+    if ($GlslangValidator) {
+        & $GlslangValidator -V --target-env vulkan1.2 '-DMOTION=1' -o "$output/live-motion.spv" "$PSScriptRoot/live_temporal.comp"
+        if ($LASTEXITCODE -ne 0) { throw "Vulkan motion SPIR-V compilation failed ($LASTEXITCODE)" }
+    }
     if ($Dxc) {
         foreach ($name in @('depth_motion', 'fsr3_reactive')) {
             $shaderArgs = @(

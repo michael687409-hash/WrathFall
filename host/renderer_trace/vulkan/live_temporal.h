@@ -19,6 +19,7 @@ class Temporal {
   ~Temporal();
 
   VkBuffer Inputs() const;
+  void ReportCompleted(std::ostream& log);
   bool Schedule(uint64_t frame, VkImage image, VkImageView output, bool written, VkImageView guest,
                 uint32_t guest_width, uint32_t guest_height, bool swap_red_blue,
                 const std::array<uint32_t, 256>& gamma, std::ostream& log);

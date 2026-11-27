@@ -7,9 +7,12 @@ using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Web.Script.Serialization;
+using Microsoft.Win32;
 
 namespace AsurasWrath.Launcher
 {
+    internal enum ShaderPreparation { Missing, Stale, Current }
+
     internal sealed class GraphicsSettings
     {
         public string Renderer = "d3d12", RenderResolution = "1280x720", DisplayMode = "windowed",
@@ -58,6 +61,8 @@ namespace AsurasWrath.Launcher
     {
         private static readonly string[] LegacyResolutions = { "1280x720", "2560x1440", "3840x2160" };
         private static readonly JavaScriptSerializer Json = new JavaScriptSerializer();
+        private readonly Dictionary<string, Tuple<long, long, string>> shaderDigests =
+            new Dictionary<string, Tuple<long, long, string>>(StringComparer.OrdinalIgnoreCase);
         private Dictionary<string, object> saved = new Dictionary<string, object>();
         private readonly string settingsPath;
         internal readonly string Root, Output, Logs;
@@ -89,20 +94,118 @@ namespace AsurasWrath.Launcher
 
         internal bool HasShaderCache(string renderer, bool temporal)
         {
+            return RecordedShaderFiles(renderer, temporal).Any();
+        }
+
+        private IEnumerable<FileInfo> RecordedShaderFiles(string renderer, bool temporal)
+        {
             string path = Path.Combine(Output, renderer == "vulkan"
                 ? @"cache\vulkan\shaders\shareable" : @"cache\shaders\shareable");
             string suffix = renderer == "vulkan" ? "vk" : "d3d12";
             string pattern = temporal && renderer == "d3d12"
                 ? "43430817.rtv.d3d12.xpso" : "43430817.*." + suffix + ".xpso";
-            return Directory.Exists(path) && Directory.EnumerateFiles(path, pattern)
-                .Any(file => new FileInfo(file).Length > 32);
+            return Directory.Exists(path)
+                ? new DirectoryInfo(path).EnumerateFiles(pattern).Where(file => file.Length > 32)
+                : Enumerable.Empty<FileInfo>();
         }
 
-        internal bool ShadersPrepared(GraphicsSettings settings, bool temporal)
+        internal ShaderPreparation ShaderPreparationStatus(GraphicsSettings settings, bool temporal)
         {
-            string renderer = settings.RuntimeRenderer == "vulkan" ? "vulkan-fsi"
-                : settings.ActiveUpscaler(temporal) == "native" ? "d3d12" : "d3d12-rtv";
-            return File.Exists(Path.Combine(Output, "shader-preparation", renderer + ".prepared"));
+            string renderer = settings.RuntimeRenderer;
+            bool upscaled = settings.ActiveUpscaler(temporal) != "native";
+            string variant = renderer == "vulkan" ? "vulkan-fsi" : upscaled ? "d3d12-rtv" : "d3d12";
+            string path = Path.Combine(Output, "shader-preparation", variant + ".prepared");
+            if (!File.Exists(path)) return ShaderPreparation.Missing;
+            return MatchesShaderPreparation(path, renderer, upscaled)
+                ? ShaderPreparation.Current : ShaderPreparation.Stale;
+        }
+
+        private bool MatchesShaderPreparation(string path, string renderer, bool upscaled)
+        {
+            try
+            {
+                var stamp = Json.Deserialize<ShaderPreparationStamp>(File.ReadAllText(path));
+                if (stamp == null || stamp.Version != 1 || stamp.Files == null || stamp.Drivers == null)
+                    return false;
+                var drivers = DisplayDriverVersions().ToArray();
+                if (drivers.Length == 0 || !drivers.SequenceEqual(stamp.Drivers, StringComparer.OrdinalIgnoreCase))
+                    return false;
+
+                var build = Path.Combine(Output, @"build\win-amd64\Release");
+                string module = "rexgpu-xenos-" + renderer + ".dll";
+                var archives = new List<FileInfo>(RecordedShaderFiles(renderer, upscaled));
+                if (archives.Count == 0) return false;
+                var shaderCode = new FileInfo(Path.Combine(archives[0].DirectoryName, "43430817.xsh"));
+                if (shaderCode.Exists) archives.Add(shaderCode);
+                var files = new List<FileInfo> { new FileInfo(Path.Combine(build, "asuras_wrath.exe")),
+                    new FileInfo(Path.Combine(build, module)) };
+                if (renderer == "vulkan")
+                {
+                    var alternate = new FileInfo(Path.Combine(Output, "vulkan-upscalers", module));
+                    if (alternate.Exists) files.Add(alternate);
+                }
+                else if (upscaled)
+                {
+                    var alternate = new FileInfo(Path.Combine(Root, "runtime", "upscalers", module));
+                    if (!alternate.Exists) alternate = new FileInfo(Path.Combine(Output, "dlss-runtime", module));
+                    files.Add(alternate);
+                }
+                int relativeStart = Root.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar).Length + 1;
+                return files.All(file => file.Exists) && files.Select(file => string.Format(CultureInfo.InvariantCulture,
+                    "{0}\t{1}\t{2}", file.FullName.Substring(relativeStart), file.Length, file.LastWriteTimeUtc.Ticks))
+                    .Concat(archives.Select(file => file.FullName.Substring(relativeStart) + "\t" + ShaderDigest(file)))
+                    .OrderBy(entry => entry, StringComparer.OrdinalIgnoreCase)
+                    .SequenceEqual(stamp.Files, StringComparer.OrdinalIgnoreCase);
+            }
+            catch (Exception error)
+            {
+                if (!(error is IOException || error is UnauthorizedAccessException ||
+                    error is System.Security.SecurityException || error is ArgumentException ||
+                    error is InvalidOperationException)) throw;
+                return false;
+            }
+        }
+
+        private string ShaderDigest(FileInfo file)
+        {
+            Tuple<long, long, string> prior;
+            long size = file.Length, ticks = file.LastWriteTimeUtc.Ticks;
+            if (shaderDigests.TryGetValue(file.FullName, out prior) && prior.Item1 == size && prior.Item2 == ticks)
+                return prior.Item3;
+            using (var sha = System.Security.Cryptography.SHA256.Create())
+            using (var input = File.Open(file.FullName, FileMode.Open, FileAccess.Read,
+                FileShare.ReadWrite | FileShare.Delete))
+            {
+                string digest = BitConverter.ToString(sha.ComputeHash(input)).Replace("-", "");
+                shaderDigests[file.FullName] = Tuple.Create(size, ticks, digest);
+                return digest;
+            }
+        }
+
+        private static IEnumerable<string> DisplayDriverVersions()
+        {
+            using (var key = Registry.LocalMachine.OpenSubKey(
+                @"SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}"))
+            {
+                if (key == null) yield break;
+                foreach (string name in key.GetSubKeyNames().Where(name => Regex.IsMatch(name, @"^\d{4}$"))
+                    .OrderBy(name => name, StringComparer.OrdinalIgnoreCase))
+                using (var adapter = key.OpenSubKey(name))
+                {
+                    if (adapter == null) continue;
+                    var version = adapter.GetValue("DriverVersion") as string;
+                    if (!string.IsNullOrWhiteSpace(version))
+                        yield return string.Join("\t", name, version, adapter.GetValue("InfPath", "").ToString(),
+                            adapter.GetValue("MatchingDeviceId", "").ToString());
+                }
+            }
+        }
+
+        private sealed class ShaderPreparationStamp
+        {
+            public int Version { get; set; }
+            public string[] Drivers { get; set; }
+            public string[] Files { get; set; }
         }
 
         internal string[] AvailableUpscalers(string renderer = "d3d12")

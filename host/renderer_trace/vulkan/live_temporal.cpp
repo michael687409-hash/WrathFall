@@ -1,6 +1,7 @@
 #include "gpu/xenos/host/vulkan/vulkan_objects.h"
 #include "gpu/xenos/vulkan/command_processor.h"
 #include "live_temporal.h"
+#include "temporal_history.h"
 #include "temporalCompose.h"
 #include "temporalHistory.h"
 #include "temporalMotion.h"
@@ -16,6 +17,7 @@
 #include <stdexcept>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace wrathfall::vulkan_live {
 namespace {
@@ -58,6 +60,7 @@ struct CounterBuffer {
   const uint32_t* mapped = nullptr;
   uint64_t frame = 0;
   bool coherent = false;
+  bool recorded = false, used_timestamps = false, upscaled = false;
 };
 
 void Check(VkResult result, const char* step) {
@@ -129,12 +132,14 @@ struct Temporal::State {
   static constexpr size_t kSlots = 8;
   enum Image { Color, Depth, Motion, History, Output, Reactive, Count };
   enum Pass { Unpack, EstimateMotion, Compose, StoreHistory };
+  enum Timestamp { Begin, Unpacked, MotionReady, Upscaled, Composed, HistoryReady, TimestampCount };
 
   explicit State(const VulkanCommandProcessor& processor_in)
       : processor(processor_in), vulkan(*processor.GetVulkanDevice()),
         vk(vulkan.GetFunctions()), device(vulkan.GetDevice()) {}
 
   ~State() {
+    if (timestamps) vk.vkDestroyQueryPool(device, timestamps, nullptr);
     for (const auto pipeline : pipelines) vk.vkDestroyPipeline(device, pipeline, nullptr);
     vk.vkDestroyDescriptorPool(device, pool, nullptr);
     vk.vkDestroyPipelineLayout(device, layout, nullptr);
@@ -158,6 +163,7 @@ struct Temporal::State {
     update_buffer = reinterpret_cast<PFN_vkCmdUpdateBuffer>(
         vulkan.GetVulkanInstance()->GetFunctions().vkGetDeviceProcAddr(device, "vkCmdUpdateBuffer"));
     if (!update_buffer) throw std::runtime_error("Vulkan buffer update command is unavailable");
+    InitTimestamps();
     if (!objects::CreateDedicatedAllocationBuffer(&vulkan, kInputsSize,
             VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
             objects::MemoryPurpose::kDeviceLocal, inputs, input_memory)) {
@@ -240,6 +246,56 @@ struct Temporal::State {
     }
   }
 
+  void InitTimestamps() {
+    const auto& instance = vulkan.GetVulkanInstance()->GetFunctions();
+    const auto physical = vulkan.GetPhysicalDevice();
+    uint32_t count = 0;
+    instance.vkGetPhysicalDeviceQueueFamilyProperties(physical, &count, nullptr);
+    const auto family = vulkan.GetQueueFamilyGraphicsCompute();
+    if (family >= count) return;
+    std::vector<VkQueueFamilyProperties> families(count);
+    instance.vkGetPhysicalDeviceQueueFamilyProperties(physical, &count, families.data());
+    if (family >= count || !families[family].timestampValidBits) return;
+    VkPhysicalDeviceProperties properties{};
+    instance.vkGetPhysicalDeviceProperties(physical, &properties);
+    if (properties.limits.timestampPeriod <= 0.0f) return;
+    timestamp_ms = properties.limits.timestampPeriod / 1e6;
+    timestamp_mask = UINT64_MAX >> (64 - families[family].timestampValidBits);
+    write_timestamp = reinterpret_cast<PFN_vkCmdWriteTimestamp>(
+        instance.vkGetDeviceProcAddr(device, "vkCmdWriteTimestamp"));
+    read_timestamps = reinterpret_cast<PFN_vkGetQueryPoolResults>(
+        instance.vkGetDeviceProcAddr(device, "vkGetQueryPoolResults"));
+    if (!write_timestamp || !read_timestamps) return;
+    VkQueryPoolCreateInfo query{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
+    query.queryType = VK_QUERY_TYPE_TIMESTAMP;
+    query.queryCount = kSlots * TimestampCount;
+    if (vk.vkCreateQueryPool(device, &query, nullptr, &timestamps) != VK_SUCCESS) {
+      timestamps = VK_NULL_HANDLE;
+    }
+  }
+
+  void Stamp(VkCommandBuffer command, uint32_t base, Timestamp point) {
+    // Keep the boundaries on the same stage, including for vendor work that uses transfers.
+    write_timestamp(command, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, timestamps, base + point);
+  }
+
+  void ReportTimings(size_t slot, const CounterBuffer& counter, std::ostream& log) {
+    std::array<uint64_t, TimestampCount> ticks{};
+    // Slot retirement already checked the submission fence. Never wait for a query here.
+    if (read_timestamps(device, timestamps, uint32_t(slot) * TimestampCount, TimestampCount,
+                        sizeof(ticks), ticks.data(), sizeof(uint64_t), VK_QUERY_RESULT_64_BIT) != VK_SUCCESS) return;
+    const auto elapsed = [&](Timestamp from, Timestamp to) {
+      return ((ticks[to] - ticks[from]) & timestamp_mask) * timestamp_ms;
+    };
+    log << "gpu-timing\t" << counter.frame << "\tupscaled=" << counter.upscaled
+        << "\tunpack_ms=" << elapsed(Begin, Unpacked)
+        << "\tmotion_ms=" << elapsed(Unpacked, MotionReady)
+        << "\tupscaler_ms=" << elapsed(MotionReady, Upscaled)
+        << "\thud_compose_ms=" << elapsed(Upscaled, Composed)
+        << "\thistory_ms=" << elapsed(Composed, HistoryReady)
+        << "\ttotal_ms=" << elapsed(Begin, HistoryReady) << '\n';
+  }
+
   void Barrier(VkCommandBuffer command, VkImage image, VkImageLayout before, VkImageLayout after,
                VkPipelineStageFlags from, VkPipelineStageFlags to, VkAccessFlags src, VkAccessFlags dst) {
     VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
@@ -291,7 +347,7 @@ struct Temporal::State {
     const auto* values = counter.mapped;
     log << "coverage\t" << counter.frame << "\tscene=" << values[0]
         << "\toverlay=" << values[1] << "\tfallback=" << values[2]
-        << "\tmotion=" << values[3] << std::endl;
+        << "\tmotion=" << values[3] << '\n';
   }
 
   void SetDescriptors(size_t slot, VkImageView guest, VkImageView output) {
@@ -334,6 +390,11 @@ struct Temporal::State {
   const VulkanDevice::Functions& vk;
   VkDevice device;
   PFN_vkCmdUpdateBuffer update_buffer = nullptr;
+  PFN_vkCmdWriteTimestamp write_timestamp = nullptr;
+  PFN_vkGetQueryPoolResults read_timestamps = nullptr;
+  VkQueryPool timestamps = VK_NULL_HANDLE;
+  double timestamp_ms = 0;
+  uint64_t timestamp_mask = 0;
   VkBuffer inputs = VK_NULL_HANDLE;
   VkDeviceMemory input_memory = VK_NULL_HANDLE;
   VkSampler sampler = VK_NULL_HANDLE;
@@ -361,16 +422,29 @@ Temporal::~Temporal() = default;
 
 VkBuffer Temporal::Inputs() const { return state_->inputs; }
 
+void Temporal::ReportCompleted(std::ostream& log) {
+  auto& s = *state_;
+  const auto done = s.processor.GetCompletedSubmission();
+  for (size_t i = 0; i < s.last_use.size(); ++i) {
+    auto& counter = s.counters[i];
+    if (!counter.recorded || s.last_use[i] > done) continue;
+    counter.recorded = false;
+    if (!log) continue;
+    s.ReportCounter(counter, log);
+    if (counter.used_timestamps) s.ReportTimings(i, counter, log);
+  }
+}
+
 bool Temporal::Schedule(uint64_t frame, VkImage image, VkImageView output, bool written, VkImageView guest,
                         uint32_t guest_width, uint32_t guest_height, bool swap_red_blue,
                         const std::array<uint32_t, 256>& gamma, std::ostream& log) {
   auto& s = *state_;
+  ReportCompleted(log);
   const auto done = s.processor.GetCompletedSubmission();
   const auto slot = std::find_if(s.last_use.begin(), s.last_use.end(), [done](uint64_t num) { return num <= done; });
   if (s.pending || slot == s.last_use.end()) return false;
   const auto index = size_t(slot - s.last_use.begin());
   auto& counter = s.counters[index];
-  if (*slot) s.ReportCounter(counter, log);
   counter.frame = frame;
   s.SetDescriptors(index, guest, output);
   *slot = s.processor.GetCurrentSubmission();
@@ -386,7 +460,14 @@ bool Temporal::Record(VkCommandBuffer command, DlssVulkan* dlss, FsrVulkan* fsr,
   auto& s = *state_;
   if (!s.pending) return false;
   const auto pending = *std::exchange(s.pending, std::nullopt);
-  const auto counter = s.counters[pending.slot].buffer;
+  auto& report = s.counters[pending.slot];
+  const auto counter = report.buffer;
+  const bool timed = s.timestamps && log.good();
+  const uint32_t query = uint32_t(pending.slot) * State::TimestampCount;
+  if (timed) {
+    s.vk.vkCmdResetQueryPool(command, s.timestamps, query, State::TimestampCount);
+    s.Stamp(command, query, State::Begin);
+  }
   const uint32_t zero[4]{};
   s.update_buffer(command, counter, 0, sizeof(zero), zero);
   s.update_buffer(command, counter, kCounterBytes, kParametersBytes - kCounterBytes, pending.gamma.data());
@@ -394,8 +475,8 @@ bool Temporal::Record(VkCommandBuffer command, DlssVulkan* dlss, FsrVulkan* fsr,
                    VK_ACCESS_TRANSFER_WRITE_BIT, kSampled | kWritten);
   const float camera_direction = projection[3] * s.previous_projection[3] +
       projection[7] * s.previous_projection[7] + projection[11] * s.previous_projection[11];
-  const bool reset = s.previous_frame == UINT64_MAX || pending.frame != s.previous_frame + 1 ||
-      (camera_found && (!s.had_camera || camera_direction < 0.92f));
+  const bool reset = ShouldResetHistory(pending.frame, s.previous_frame, camera_found,
+                                        s.had_camera, camera_direction);
   const auto camera = MakeCamera(projection, s.previous_projection, camera_found, reset || !s.had_camera);
   PushConstants constants{camera.clip_to_previous_clip, jitter, reset ? jitter : s.previous_jitter,
                           pending.allocation, (reset ? 1u : 0u) | (pending.swap_red_blue ? 2u : 0u)};
@@ -404,8 +485,10 @@ bool Temporal::Record(VkCommandBuffer command, DlssVulkan* dlss, FsrVulkan* fsr,
   }
   s.Transition(command, State::History, kGeneral, kSampled | kWritten, kSampled | kWritten);
   s.Dispatch(command, State::Unpack, pending.set, constants, kRender);
+  if (timed) s.Stamp(command, query, State::Unpacked);
   for (const auto i : {State::Color, State::Depth}) s.Transition(command, i, kGeneral, kWritten, kSampled);
   s.Dispatch(command, State::EstimateMotion, pending.set, constants, {kRender.width / 2, kRender.height / 2});
+  if (timed) s.Stamp(command, query, State::MotionReady);
   for (const auto i : {State::Color, State::Depth, State::Motion, State::Reactive}) {
     s.Transition(command, i, kReadOnly, kSampled | kWritten, kSampled);
   }
@@ -430,6 +513,7 @@ bool Temporal::Record(VkCommandBuffer command, DlssVulkan* dlss, FsrVulkan* fsr,
   } catch (const std::exception& failure) {
     log << "upscale-error\t" << pending.frame << '\t' << failure.what() << std::endl;
   }
+  if (timed) s.Stamp(command, query, State::Upscaled);
   s.Transition(command, State::Color, kGeneral, kSampled, kSampled);
   if (upscaled) {
     s.Transition(command, State::Output, kGeneral, kWritten, kSampled);
@@ -439,10 +523,12 @@ bool Temporal::Record(VkCommandBuffer command, DlssVulkan* dlss, FsrVulkan* fsr,
             pending.written ? VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT : VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
             kCompute, pending.written ? kSampled : 0, kWritten);
   s.Dispatch(command, State::Compose, pending.set, constants, kOutput);
+  if (timed) s.Stamp(command, query, State::Composed);
   s.Barrier(command, pending.image, kGeneral, kReadOnly, kCompute, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
             kWritten, kSampled);
   s.Transition(command, State::History, kGeneral, kSampled, kWritten);
   s.Dispatch(command, State::StoreHistory, pending.set, constants, kRender);
+  if (timed) s.Stamp(command, query, State::HistoryReady);
   s.CounterBarrier(command, counter, kCompute, VK_PIPELINE_STAGE_HOST_BIT,
                    kWritten, VK_ACCESS_HOST_READ_BIT);
   s.previous_frame = upscaled ? pending.frame : UINT64_MAX;
@@ -450,11 +536,14 @@ bool Temporal::Record(VkCommandBuffer command, DlssVulkan* dlss, FsrVulkan* fsr,
   s.previous_projection = projection;
   s.had_camera = camera_found;
   s.previous_jitter = jitter;
+  report.recorded = true;
+  report.used_timestamps = timed;
+  report.upscaled = upscaled;
   if (upscaled) {
     log << "upscaled\t" << pending.frame << '\t' << (dlss ? "dlss" : "fsr3")
         << "\t2560x1440\thud=" << hud_draws << "\tblend=" << hud_blends
         << "\tstencil=" << stencil_draws << "\tguest_motion_draws=" << motion_draws
-        << "\tcamera=" << camera_found << "\treset=" << reset << std::endl;
+        << "\tcamera=" << camera_found << "\treset=" << reset << '\n';
   }
   return upscaled;
 }

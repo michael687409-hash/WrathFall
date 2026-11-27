@@ -14,6 +14,7 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -436,6 +437,97 @@ void SavePng(IWICImagingFactory& factory, const fs::path& path, const Frame& fra
   winrt::check_hresult(encoder->Commit());
 }
 
+class ScreenshotWriter {
+ public:
+  ScreenshotWriter() : worker_([this] { Run(); }) {}
+  ~ScreenshotWriter() { Finish(); }
+
+  bool Enqueue(const fs::path& path, Snapshot frame, bool required) {
+    const size_t size = frame->pixels.size() * sizeof(uint32_t);
+    std::unique_lock lock(mutex_);
+    const auto room = [&] {
+      return failed_ || pending_bytes_ == 0 ||
+          (size <= kCapacity && pending_bytes_ <= kCapacity - size);
+    };
+    // Optional automatic captures can yield to the queue. Retain manual, crash, and fallback evidence.
+    if (required) ready_.wait(lock, room);
+    if (!room() || failed_) return false;
+    jobs_.push_back({path, std::move(frame), size});
+    pending_bytes_ += size;
+    lock.unlock();
+    ready_.notify_all();
+    return true;
+  }
+
+  void Finish() {
+    if (!worker_.joinable()) return;
+    {
+      std::lock_guard lock(mutex_);
+      closing_ = true;
+    }
+    ready_.notify_all();
+    worker_.join();
+  }
+
+ private:
+  struct Job {
+    fs::path path;
+    Snapshot frame;
+    size_t size;
+  };
+  static constexpr size_t kCapacity = 256 * 1024 * 1024;
+
+  void Run() noexcept {
+    try {
+      winrt::init_apartment();
+      auto factory = winrt::create_instance<IWICImagingFactory>(CLSID_WICImagingFactory);
+      for (;;) {
+        std::unique_lock lock(mutex_);
+        ready_.wait(lock, [&] { return closing_ || !jobs_.empty(); });
+        if (jobs_.empty()) break;
+        auto job = std::move(jobs_.front());
+        jobs_.pop_front();
+        lock.unlock();
+
+        auto temp = job.path;
+        temp += L".tmp";
+        try {
+          SavePng(*factory, temp, *job.frame);
+          if (!MoveFileExW(temp.c_str(), job.path.c_str(), MOVEFILE_REPLACE_EXISTING)) {
+            winrt::throw_last_error();
+          }
+        } catch (...) {
+          std::error_code error;
+          fs::remove(temp, error);
+          std::fwprintf(stderr, L"Could not write screenshot %ls.\n", job.path.c_str());
+        }
+        job.frame.reset();
+        lock.lock();
+        pending_bytes_ -= job.size;
+        lock.unlock();
+        ready_.notify_all();
+      }
+      factory = nullptr;
+      winrt::uninit_apartment();
+    } catch (...) {
+      std::fwprintf(stderr, L"Screenshot worker stopped. Screenshot files may be missing.\n");
+      {
+        std::lock_guard lock(mutex_);
+        failed_ = true;
+        jobs_.clear();
+      }
+      ready_.notify_all();
+    }
+  }
+
+  std::mutex mutex_;
+  std::condition_variable ready_;
+  std::deque<Job> jobs_;
+  size_t pending_bytes_ = 0;
+  bool closing_ = false, failed_ = false;
+  std::thread worker_;
+};
+
 fs::path ProcessImage(HANDLE process) {
   std::wstring path(32768, L'\0');
   DWORD size = static_cast<DWORD>(path.size());
@@ -589,7 +681,7 @@ class MarkKey {
   inline static bool marked_ = false;
 };
 
-void SaveMark(IWICImagingFactory& factory, const fs::path& project, const fs::path& session,
+void SaveMark(ScreenshotWriter& screenshots, const fs::path& project, const fs::path& session,
               const Mark& mark, uint32_t number, DWORD pid) {
   const auto output = session / (std::to_string(number) + "-" + mark.reason);
   fs::create_directories(output);
@@ -620,13 +712,20 @@ void SaveMark(IWICImagingFactory& factory, const fs::path& project, const fs::pa
   CopyLogTail(project, output);
   std::ofstream timeline(output / "frames.csv");
   timeline << "image,unix_ms,relative_to_mark_ms,width,height\n";
+  const std::string_view reason(mark.reason);
+  const bool required = reason == "manual" || reason == "game-exit";
+  size_t skipped = 0;
   for (size_t i = 0; i < mark.frames.size(); ++i) {
     const auto name = std::to_string(1000 + i).substr(1) + ".png";
     const Frame& frame = *mark.frames[i];
-    SavePng(factory, output / name, frame);
+    if (!screenshots.Enqueue(output / name, mark.frames[i], required)) {
+      ++skipped;
+      continue;
+    }
     timeline << name << ',' << frame.time << ',' << frame.time - mark.time << ','
              << frame.width << ',' << frame.height << '\n';
   }
+  if (skipped) info << "screenshots_not_queued=" << skipped << '\n';
   std::wprintf(L"Saved %ls\n", output.c_str());
   std::fflush(stdout);
 }
@@ -680,19 +779,19 @@ class FallbackMonitor {
     return request_screenshot;
   }
 
-  void Publish(IWICImagingFactory& factory, const fs::path& project, const fs::path& session,
+  void Publish(ScreenshotWriter& screenshots, const fs::path& project, const fs::path& session,
                const std::deque<Snapshot>& images, uint32_t& written, DWORD pid, bool final) {
     if (final) Close();
     const auto now = Clock::now();
     if (active_ && active_->output.empty() && now >= active_->capture_until) {
-      Save(factory, project, session, images, written, pid, *active_, true);
+      Save(screenshots, project, session, images, written, pid, *active_, true);
     }
     for (auto it = ended_.begin(); it != ended_.end();) {
       if (!final && it->output.empty() && now < it->capture_until) {
         ++it;
         continue;
       }
-      Save(factory, project, session, images, written, pid, *it, false);
+      Save(screenshots, project, session, images, written, pid, *it, false);
       it = ended_.erase(it);
     }
   }
@@ -704,7 +803,7 @@ class FallbackMonitor {
     active_.reset();
   }
 
-  void Save(IWICImagingFactory& factory, const fs::path& project, const fs::path& session,
+  void Save(ScreenshotWriter& screenshots, const fs::path& project, const fs::path& session,
             const std::deque<Snapshot>& images, uint32_t& written, DWORD pid,
             FallbackIncident& incident, bool ongoing) const {
     const bool first_write = incident.output.empty();
@@ -725,7 +824,10 @@ class FallbackMonitor {
         best_distance = distance;
         best_follows = follows;
       }
-      if (incident.screenshot) SavePng(factory, incident.output / "screenshot.png", *incident.screenshot);
+      if (incident.screenshot &&
+          !screenshots.Enqueue(incident.output / "screenshot.png", incident.screenshot, true)) {
+        incident.screenshot.reset();
+      }
       CopyLogTail(project, incident.output);
       std::error_code error;
       fs::copy_file(project / "out" / "launcher-settings.json",
@@ -780,7 +882,7 @@ void Collect(const fs::path& project, DWORD pid, HWND window, HANDLE process, bo
              const Graphics& graphics) {
   WindowCapture recorder(window);
   MarkKey hotkey(window);
-  auto factory = winrt::create_instance<IWICImagingFactory>(CLSID_WICImagingFactory);
+  ScreenshotWriter screenshots;
   const auto session = project / "out" / "diagnostics" / std::to_string(EpochMilliseconds());
   fs::create_directories(session);
   {
@@ -880,7 +982,7 @@ void Collect(const fs::path& project, DWORD pid, HWND window, HANDLE process, bo
     }
     if (now >= next_fallback_read) {
       if (fallbacks.Read()) recorder.RequestSnapshot();
-      fallbacks.Publish(*factory, project, session, ring, written, pid, false);
+      fallbacks.Publish(screenshots, project, session, ring, written, pid, false);
       next_fallback_read = now + 50ms;
     }
     for (auto it = marks.begin(); it != marks.end();) {
@@ -888,7 +990,7 @@ void Collect(const fs::path& project, DWORD pid, HWND window, HANDLE process, bo
         ++it;
         continue;
       }
-      SaveMark(*factory, project, session, *it, ++written, pid);
+      SaveMark(screenshots, project, session, *it, ++written, pid);
       it = marks.erase(it);
     }
     Sleep(12);
@@ -903,8 +1005,8 @@ void Collect(const fs::path& project, DWORD pid, HWND window, HANDLE process, bo
     if (GetExitCodeProcess(process, &code) && code != 0) mark("game-exit", EpochMilliseconds(), code);
   }
   fallbacks.Read();
-  fallbacks.Publish(*factory, project, session, ring, written, pid, true);
-  for (const auto& pending : marks) SaveMark(*factory, project, session, pending, ++written, pid);
+  fallbacks.Publish(screenshots, project, session, ring, written, pid, true);
+  for (const auto& pending : marks) SaveMark(screenshots, project, session, pending, ++written, pid);
 }
 
 void SelfTest(const fs::path& output) {
@@ -1012,21 +1114,15 @@ void SelfTest(const fs::path& output) {
   if (focus_after.ghosting || focus_after.blur) throw std::runtime_error("A focus gap was flagged as a visual issue.");
 
   fs::create_directories(output);
+  ScreenshotWriter screenshots;
   auto factory = winrt::create_instance<IWICImagingFactory>(CLSID_WICImagingFactory);
   const auto full_image = output / "full-resolution.png";
-  SavePng(*factory, full_image, detailed);
-  winrt::com_ptr<IWICBitmapDecoder> decoder;
-  winrt::com_ptr<IWICBitmapFrameDecode> decoded;
-  winrt::check_hresult(factory->CreateDecoderFromFilename(full_image.c_str(), nullptr, GENERIC_READ,
-      WICDecodeMetadataCacheOnDemand, decoder.put()));
-  winrt::check_hresult(decoder->GetFrame(0, decoded.put()));
-  UINT decoded_width = 0, decoded_height = 0;
-  winrt::check_hresult(decoded->GetSize(&decoded_width, &decoded_height));
-  if (decoded_width != detailed.width || decoded_height != detailed.height)
-    throw std::runtime_error("The comparison screenshot was resized.");
-  Mark test{"self-test", frame.time, 0, Clock::now(), Inspect(frame),
+  if (!screenshots.Enqueue(full_image, std::make_shared<Frame>(detailed), true)) {
+    throw std::runtime_error("Could not queue full-resolution screenshot.");
+  }
+  Mark test{"manual", frame.time, 0, Clock::now(), Inspect(frame),
             {std::make_shared<Frame>(std::move(frame))}, {{frame.time, 75.0}}, hitch};
-  SaveMark(*factory, output, output, test, 1, 0);
+  SaveMark(screenshots, output, output, test, 1, 0);
 
   events::SceneEvidence scene{};
   scene.recent_gameplay = true;
@@ -1066,7 +1162,19 @@ void SelfTest(const fs::path& output) {
   uint32_t written = 1;
   auto screenshot = std::make_shared<Frame>(*test.frames.front());
   screenshot->time = EpochMilliseconds();
-  monitor.Publish(*factory, output, output, {screenshot}, written, 22, true);
+  monitor.Publish(screenshots, output, output, {screenshot}, written, 22, true);
+  screenshots.Finish();
+  winrt::com_ptr<IWICBitmapDecoder> decoder;
+  winrt::com_ptr<IWICBitmapFrameDecode> decoded;
+  winrt::check_hresult(factory->CreateDecoderFromFilename(full_image.c_str(), nullptr, GENERIC_READ,
+      WICDecodeMetadataCacheOnDemand, decoder.put()));
+  winrt::check_hresult(decoder->GetFrame(0, decoded.put()));
+  UINT decoded_width = 0, decoded_height = 0;
+  winrt::check_hresult(decoded->GetSize(&decoded_width, &decoded_height));
+  if (decoded_width != detailed.width || decoded_height != detailed.height ||
+      !fs::is_regular_file(output / "1-manual" / "000.png")) {
+    throw std::runtime_error("A queued screenshot was resized or lost.");
+  }
   const auto first_report = output / "2-upscaler-fallback";
   const auto second_report = output / "3-upscaler-fallback";
   const auto read_file = [](const fs::path& path) {

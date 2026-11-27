@@ -71,6 +71,55 @@ $out = Join-Path $PSScriptRoot 'out'
 $manifest = Join-Path $PSScriptRoot 'asuras_wrath_manifest.toml'
 . (Join-Path $PSScriptRoot 'ProjectInputs.ps1')
 
+function Get-ShaderPreparationStamp([string] $Root, [string] $Renderer, [bool] $Temporal,
+                                    [string] $CacheRoot, [string] $CachePattern) {
+    $key = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey(
+        'SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}')
+    if (!$key) { return }
+    try {
+        $drivers = @(foreach ($name in ($key.GetSubKeyNames() | Where-Object { $_ -match '^\d{4}$' } | Sort-Object)) {
+            $adapter = $key.OpenSubKey($name)
+            if (!$adapter) { continue }
+            try {
+                $version = $adapter.GetValue('DriverVersion')
+                if (![string]::IsNullOrWhiteSpace($version)) {
+                    "$name`t$version`t$($adapter.GetValue('InfPath', ''))`t$($adapter.GetValue('MatchingDeviceId', ''))"
+                }
+            } finally { $adapter.Dispose() }
+        })
+    } finally { $key.Dispose() }
+    if (!$drivers.Count) { return }
+
+    $shareable = Join-Path $CacheRoot 'shaders\shareable'
+    $archives = @(Get-ChildItem -LiteralPath $shareable -File -Filter $CachePattern |
+        Where-Object Length -GT 32)
+    if (!$archives.Count) { return }
+    $shaderCode = Join-Path $shareable '43430817.xsh'
+    if (Test-Path -LiteralPath $shaderCode -PathType Leaf) { $archives += Get-Item -LiteralPath $shaderCode }
+    $build = Join-Path $Root 'out\build\win-amd64\Release'
+    $module = "rexgpu-xenos-$Renderer.dll"
+    $paths = @((Join-Path $build 'asuras_wrath.exe'), (Join-Path $build $module))
+    if ($Renderer -eq 'vulkan') {
+        $alternate = Join-Path $Root "out\vulkan-upscalers\$module"
+        if (Test-Path -LiteralPath $alternate -PathType Leaf) { $paths += $alternate }
+    } elseif ($Temporal) {
+        $alternate = Join-Path $Root "runtime\upscalers\$module"
+        if (!(Test-Path -LiteralPath $alternate -PathType Leaf)) {
+            $alternate = Join-Path $Root "out\dlss-runtime\$module"
+        }
+        $paths += $alternate
+    }
+    $relativeStart = $Root.TrimEnd('\', '/').Length + 1
+    [string[]] $lines = @(foreach ($file in (Get-Item -LiteralPath $paths)) {
+        "$($file.FullName.Substring($relativeStart))`t$($file.Length)`t$($file.LastWriteTimeUtc.Ticks)"
+    })
+    $lines += @(foreach ($file in $archives) {
+        "$($file.FullName.Substring($relativeStart))`t$((Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash)"
+    })
+    [Array]::Sort($lines, [StringComparer]::OrdinalIgnoreCase)
+    [ordered]@{ Version = 1; Drivers = $drivers; Files = $lines } | ConvertTo-Json -Compress
+}
+
 function Invoke-Program([string] $Program, [string[]] $Arguments) {
     & $Program @Arguments
     if ($LASTEXITCODE -ne 0) { throw "$Program exited with code $LASTEXITCODE." }
@@ -194,6 +243,12 @@ try {
                 -Filter $cachePattern `
                 -ErrorAction SilentlyContinue | Where-Object Length -GT 32
             if (!$recorded) { throw 'No recorded shaders for this renderer are available to precompile.' }
+            $preparationStamp = $null
+            try {
+                $preparationStamp = Get-ShaderPreparationStamp $PSScriptRoot $Renderer ($Upscaler -ne 'native') $cacheRoot $cachePattern
+            } catch {
+                Write-Warning "Unable to identify the inputs for shader preparation. $($_.Exception.Message)"
+            }
             $userRoot = Join-Path $out 'shader-preparation\user'
             $logRoot = Join-Path $out 'logs\shader-preparation'
             Write-Output 'Precompiling recorded shaders...'
@@ -332,9 +387,24 @@ try {
             $variant = if ($Renderer -eq 'vulkan') { 'vulkan-fsi' }
                 elseif ($Upscaler -eq 'native') { $Renderer } else { 'd3d12-rtv' }
             $prepared = Join-Path $out "shader-preparation\$variant.prepared"
-            [void][IO.Directory]::CreateDirectory((Split-Path -Parent $prepared))
-            [IO.File]::WriteAllText($prepared, [DateTime]::UtcNow.ToString('o'))
             Write-Output 'Recorded shader precompilation finished.'
+            try {
+                $current = Get-ShaderPreparationStamp $PSScriptRoot $Renderer ($Upscaler -ne 'native') $cacheRoot $cachePattern
+                if (!$preparationStamp -or $current -cne $preparationStamp) {
+                    Write-Warning 'The shader preparation inputs could not be verified. Recompile shaders to update their status.'
+                    return
+                }
+                [void][IO.Directory]::CreateDirectory((Split-Path -Parent $prepared))
+                $pending = "$prepared.$PID.tmp"
+                try {
+                    [IO.File]::WriteAllText($pending, $current)
+                    Move-Item -LiteralPath $pending -Destination $prepared -Force
+                } finally {
+                    if (Test-Path -LiteralPath $pending -PathType Leaf) { Remove-Item -LiteralPath $pending }
+                }
+            } catch {
+                Write-Warning "Could not save the shader preparation status. $($_.Exception.Message)"
+            }
         }
         return
     }

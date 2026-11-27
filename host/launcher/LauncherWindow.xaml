@@ -13,7 +13,7 @@
       <Setter Property="Margin" Value="0,0,0,12"/>
     </Style>
     <Style x:Key="Card" TargetType="Border">
-      <Setter Property="Background" Value="#D0181616"/><Setter Property="BorderBrush" Value="{StaticResource Outline}"/>
+      <Setter Property="Background" Value="#5C181616"/><Setter Property="BorderBrush" Value="{StaticResource Outline}"/>
       <Setter Property="BorderThickness" Value="1"/><Setter Property="CornerRadius" Value="10"/>
       <Setter Property="Padding" Value="18"/>
     </Style>
@@ -186,6 +186,18 @@
         </ControlTemplate>
       </Setter.Value></Setter>
     </Style>
+    <Style x:Key="NrHeading" TargetType="TextBlock">
+      <Setter Property="FontSize" Value="16"/>
+      <Setter Property="FontWeight" Value="SemiBold"/>
+      <Setter Property="Margin" Value="0,0,0,12"/>
+    </Style>
+    <Style x:Key="NrSlider" TargetType="Slider">
+      <Setter Property="Margin" Value="0,1,0,12"/>
+      <Setter Property="TickFrequency" Value="0.01"/>
+      <Setter Property="SmallChange" Value="0.01"/>
+      <Setter Property="LargeChange" Value="0.1"/>
+      <Setter Property="IsSnapToTickEnabled" Value="True"/>
+    </Style>
   </Window.Resources>
 
   <Grid>
@@ -199,7 +211,7 @@
         </LinearGradientBrush>
       </Border.Background>
     </Border>
-    <Border Background="#D5151313" BorderBrush="{StaticResource Outline}" BorderThickness="0,0,1,0">
+    <Border Background="#60151313" BorderBrush="{StaticResource Outline}" BorderThickness="0,0,1,0">
       <DockPanel Margin="16,25,16,18">
         <TextBlock DockPanel.Dock="Top" Text="WrathFall" FontSize="22" FontWeight="SemiBold" Margin="7,5,0,29"/>
         <StackPanel DockPanel.Dock="Bottom">
@@ -210,6 +222,7 @@
           <Button x:Name="NavPlay" Content="Play" Style="{StaticResource Navigation}"/>
           <Button x:Name="NavSetup" Content="Game files" Style="{StaticResource Navigation}"/>
           <Button x:Name="NavGraphics" Content="Graphics" Style="{StaticResource Navigation}"/>
+          <Button x:Name="NavDlssNr" Content="DLSS NR" Style="{StaticResource Navigation}"/>
           <Button x:Name="NavAchievements" Content="Achievements" Style="{StaticResource Navigation}"/>
         </StackPanel>
       </DockPanel>
@@ -230,11 +243,11 @@
             <TextBlock x:Name="CacheState" Foreground="{StaticResource Muted}" Margin="0,3,0,0" FontSize="12"/>
           </StackPanel>
         </Border>
-        <Border Grid.Row="1" Style="{StaticResource Card}" Background="#B01A1717" Padding="15">
+        <Border Grid.Row="1" Style="{StaticResource Card}" Background="#4F1A1717" Padding="15">
           <DockPanel>
             <TextBlock Text="Activity" DockPanel.Dock="Top" FontSize="16" FontWeight="SemiBold" Margin="0,0,0,10"/>
             <TextBox x:Name="OutputLog" IsReadOnly="True" AutomationProperties.Name="Activity log"
-                     Background="#95121111" Foreground="#E3D7D4" BorderThickness="0" FontFamily="Consolas"
+                     Background="#42121111" Foreground="#E3D7D4" BorderThickness="0" FontFamily="Consolas"
                      FontSize="12" Padding="9" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto"
                      Text="Build, import, and game output will appear here."/>
           </DockPanel>
@@ -268,10 +281,7 @@
 
       <ScrollViewer x:Name="GraphicsPage" VerticalScrollBarVisibility="Auto" Visibility="Collapsed">
         <StackPanel>
-          <DockPanel Margin="0,0,0,12">
-            <Button x:Name="ResetGraphics" Content="Reset graphics" DockPanel.Dock="Right" Margin="10,0,0,0"/>
-            <TextBlock Text="Graphics" Style="{StaticResource Title}" Margin="0" VerticalAlignment="Center"/>
-          </DockPanel>
+          <TextBlock Text="Graphics" Style="{StaticResource Title}" Margin="0,0,0,12"/>
           <Border Style="{StaticResource Card}">
             <StackPanel>
               <Grid>
@@ -320,13 +330,221 @@
         </StackPanel>
       </ScrollViewer>
 
+      <ScrollViewer x:Name="DlssNrPage" VerticalScrollBarVisibility="Auto" Visibility="Collapsed">
+        <StackPanel>
+          <TextBlock Text="DLSS NR" Style="{StaticResource Title}"/>
+          <Border Style="{StaticResource Card}" Margin="0,0,0,12">
+            <StackPanel>
+              <TextBlock Text="Settings preview" Foreground="{StaticResource Accent}" FontWeight="SemiBold"/>
+              <TextBlock Text="DLSS Neural Rendering is unavailable during gameplay. Preview changes last until you close the launcher."
+                         Foreground="{StaticResource Muted}" TextWrapping="Wrap" Margin="0,6,0,12"/>
+              <CheckBox x:Name="NeuralRenderingEnable" Content="Enable DLSS NR" IsEnabled="False"/>
+            </StackPanel>
+          </Border>
+
+          <Border Style="{StaticResource Card}" Margin="0,0,0,12">
+            <StackPanel>
+              <TextBlock Text="Render pipeline" Style="{StaticResource NrHeading}"/>
+              <Grid>
+                <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="24"/><ColumnDefinition/></Grid.ColumnDefinitions>
+                <StackPanel>
+                  <Label Content="Neural placement" Target="{Binding ElementName=NrPlacement}"/>
+                  <ComboBox x:Name="NrPlacement" SelectedIndex="0" Margin="0,0,0,12"
+                            AutomationProperties.HelpText="Placement relative to DLSS Super Resolution">
+                    <ComboBoxItem Content="Downstream (after DLSS SR)"/>
+                    <ComboBoxItem Content="Upstream (before DLSS SR)"/>
+                  </ComboBox>
+                  <DockPanel>
+                    <TextBlock DockPanel.Dock="Right" Foreground="{StaticResource Accent}"
+                               Text="{Binding Value, ElementName=NrPassCount, StringFormat={}{0:0}}"/>
+                    <Label Content="Neural passes" Target="{Binding ElementName=NrPassCount}"/>
+                  </DockPanel>
+                  <Slider x:Name="NrPassCount" Style="{StaticResource NrSlider}" Minimum="1" Maximum="30"
+                          Value="1" TickFrequency="1" SmallChange="1" LargeChange="5"/>
+                </StackPanel>
+                <StackPanel Grid.Column="2">
+                  <DockPanel>
+                    <TextBlock DockPanel.Dock="Right" Foreground="{StaticResource Accent}"
+                               Text="{Binding Value, ElementName=NrWorkScale, StringFormat={}{0:0}%}"/>
+                    <Label Content="NR work resolution" Target="{Binding ElementName=NrWorkScale}"/>
+                  </DockPanel>
+                  <Slider x:Name="NrWorkScale" Style="{StaticResource NrSlider}" Minimum="10" Maximum="150"
+                          Value="100" TickFrequency="1" SmallChange="1" LargeChange="10"
+                          AutomationProperties.HelpText="Percentage of 720p upstream or the selected output resolution downstream"/>
+                  <TextBlock x:Name="NrWorkSize" Foreground="{StaticResource Muted}" Margin="0,0,0,8"/>
+                </StackPanel>
+              </Grid>
+            </StackPanel>
+          </Border>
+
+          <Border Style="{StaticResource Card}" Margin="0,0,0,12">
+            <StackPanel>
+              <DockPanel Margin="0,0,0,12">
+                <Button x:Name="NrResetPass" DockPanel.Dock="Right" Content="Reset selected pass" Margin="12,0,0,0"/>
+                <StackPanel>
+                  <Label Content="Edit neural pass" Target="{Binding ElementName=NrPassSelector}"/>
+                  <ComboBox x:Name="NrPassSelector"/>
+                </StackPanel>
+              </DockPanel>
+              <Grid x:Name="NrPassControls">
+                <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="24"/><ColumnDefinition/></Grid.ColumnDefinitions>
+                <StackPanel>
+                  <Label Content="NR model preset" Target="{Binding ElementName=NrModel}"/>
+                  <ComboBox x:Name="NrModel" SelectedIndex="{Binding Model, Mode=TwoWay}" Margin="0,0,0,12">
+                    <ComboBoxItem Content="Game default"/>
+                    <ComboBoxItem Content="Preset A"/>
+                    <ComboBoxItem Content="Preset B (FP8)"/>
+                  </ComboBox>
+                  <DockPanel>
+                    <TextBlock DockPanel.Dock="Right" Foreground="{StaticResource Accent}"
+                               Text="{Binding Value, ElementName=NrIntensity, StringFormat={}{0:0.00}}"/>
+                    <Label Content="Intensity" Target="{Binding ElementName=NrIntensity}"/>
+                  </DockPanel>
+                  <Slider x:Name="NrIntensity" Style="{StaticResource NrSlider}" Minimum="1" Maximum="4" Value="{Binding Intensity, Mode=TwoWay}"/>
+                  <DockPanel>
+                    <TextBlock DockPanel.Dock="Right" Foreground="{StaticResource Accent}"
+                               Text="{Binding Value, ElementName=NrLocalTone, StringFormat={}{0:0.00}}"/>
+                    <Label Content="Local tone" Target="{Binding ElementName=NrLocalTone}"/>
+                  </DockPanel>
+                  <Slider x:Name="NrLocalTone" Style="{StaticResource NrSlider}" Maximum="4" Value="{Binding LocalTone, Mode=TwoWay}"/>
+                  <DockPanel>
+                    <TextBlock DockPanel.Dock="Right" Foreground="{StaticResource Accent}"
+                               Text="{Binding Value, ElementName=NrGlobalTone, StringFormat={}{0:0.00}}"/>
+                    <Label Content="Global tone" Target="{Binding ElementName=NrGlobalTone}"/>
+                  </DockPanel>
+                  <Slider x:Name="NrGlobalTone" Style="{StaticResource NrSlider}" Maximum="4" Value="{Binding GlobalTone, Mode=TwoWay}"/>
+                  <DockPanel>
+                    <TextBlock DockPanel.Dock="Right" Foreground="{StaticResource Accent}"
+                               Text="{Binding Value, ElementName=NrLocalStructure, StringFormat={}{0:0.00}}"/>
+                    <Label Content="Local structure" Target="{Binding ElementName=NrLocalStructure}"/>
+                  </DockPanel>
+                  <Slider x:Name="NrLocalStructure" Style="{StaticResource NrSlider}" Maximum="4" Value="{Binding LocalStructure, Mode=TwoWay}"/>
+                </StackPanel>
+                <StackPanel Grid.Column="2">
+                  <Label Content="NR style" Target="{Binding ElementName=NrStyle}"/>
+                  <ComboBox x:Name="NrStyle" SelectedIndex="{Binding Style, Mode=TwoWay}" Margin="0,0,0,12">
+                    <ComboBoxItem Content="Default"/>
+                    <ComboBoxItem Content="Natural"/>
+                    <ComboBoxItem Content="Cinematic"/>
+                  </ComboBox>
+                  <Label Content="Depth convention" Target="{Binding ElementName=NrDepth}"/>
+                  <ComboBox x:Name="NrDepth" SelectedIndex="{Binding Depth, Mode=TwoWay}" Margin="0,0,0,12">
+                    <ComboBoxItem Content="Use game"/>
+                    <ComboBoxItem Content="Standard depth"/>
+                    <ComboBoxItem Content="Reversed depth"/>
+                  </ComboBox>
+                  <DockPanel>
+                    <TextBlock DockPanel.Dock="Right" Foreground="{StaticResource Accent}"
+                               Text="{Binding Value, ElementName=NrMotionX, StringFormat={}{0:0.00}}"/>
+                    <Label Content="Motion scale X" Target="{Binding ElementName=NrMotionX}"/>
+                  </DockPanel>
+                  <Slider x:Name="NrMotionX" Style="{StaticResource NrSlider}" Minimum="-4" Maximum="4" Value="{Binding MotionX, Mode=TwoWay}"/>
+                  <DockPanel>
+                    <TextBlock DockPanel.Dock="Right" Foreground="{StaticResource Accent}"
+                               Text="{Binding Value, ElementName=NrMotionY, StringFormat={}{0:0.00}}"/>
+                    <Label Content="Motion scale Y" Target="{Binding ElementName=NrMotionY}"/>
+                  </DockPanel>
+                  <Slider x:Name="NrMotionY" Style="{StaticResource NrSlider}" Minimum="-4" Maximum="4" Value="{Binding MotionY, Mode=TwoWay}"/>
+                  <CheckBox x:Name="NrUiCorrection" Content="UI correction" IsChecked="{Binding UiCorrection, Mode=TwoWay}"/>
+                </StackPanel>
+              </Grid>
+            </StackPanel>
+          </Border>
+
+          <Border Style="{StaticResource Card}" Margin="0,0,0,12"
+                  DataContext="{Binding DataContext, ElementName=NrPassControls}">
+            <StackPanel>
+              <DockPanel Margin="0,0,0,12">
+                <CheckBox x:Name="NrAutoMask" DockPanel.Dock="Right" Content="Automatic skin mask"
+                          IsChecked="{Binding AutoMask, Mode=TwoWay}"/>
+                <TextBlock Text="Skin" Style="{StaticResource NrHeading}" Margin="0"/>
+              </DockPanel>
+              <DockPanel>
+                <TextBlock DockPanel.Dock="Right" Foreground="{StaticResource Accent}"
+                           Text="{Binding Value, ElementName=NrSkinDetail, StringFormat={}{0:0.00}}"/>
+                <Label Content="Skin detail" Target="{Binding ElementName=NrSkinDetail}"/>
+              </DockPanel>
+              <Slider x:Name="NrSkinDetail" Style="{StaticResource NrSlider}" Maximum="4"
+                      Value="{Binding SkinDetail, Mode=TwoWay}" Margin="0,1,0,0"/>
+            </StackPanel>
+          </Border>
+
+          <Border Style="{StaticResource Card}" Margin="0,0,0,12">
+            <StackPanel>
+              <TextBlock Text="Color and tone" Style="{StaticResource NrHeading}"/>
+              <Grid>
+                <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="24"/><ColumnDefinition/></Grid.ColumnDefinitions>
+                <StackPanel>
+                  <CheckBox x:Name="NrNativeLook" Content="Preserve native tone and color" Margin="0,0,0,12"/>
+                  <CheckBox x:Name="NrAdaptiveWhite" Content="Adaptive scene white" IsChecked="True" Margin="0,0,0,12"/>
+                  <DockPanel>
+                    <TextBlock DockPanel.Dock="Right" Foreground="{StaticResource Accent}"
+                               Text="{Binding Value, ElementName=NrPaperWhiteScale, StringFormat={}{0:0.000}}"/>
+                    <Label Content="Paper white scale" Target="{Binding ElementName=NrPaperWhiteScale}"/>
+                  </DockPanel>
+                  <Slider x:Name="NrPaperWhiteScale" Style="{StaticResource NrSlider}" Minimum="0.1" Maximum="4" Value="1.765" TickFrequency="0.005"/>
+                </StackPanel>
+                <StackPanel Grid.Column="2">
+                  <DockPanel>
+                    <TextBlock DockPanel.Dock="Right" Foreground="{StaticResource Accent}"
+                               Text="{Binding Value, ElementName=NrTransferStrength, StringFormat={}{0:0.00}}"/>
+                    <Label Content="HDR transfer strength" Target="{Binding ElementName=NrTransferStrength}"/>
+                  </DockPanel>
+                  <Slider x:Name="NrTransferStrength" Style="{StaticResource NrSlider}" Maximum="2" Value="1"/>
+                  <DockPanel>
+                    <TextBlock DockPanel.Dock="Right" Foreground="{StaticResource Accent}"
+                               Text="{Binding Value, ElementName=NrColorStrength, StringFormat={}{0:0.00}}"/>
+                    <Label Content="Color strength" Target="{Binding ElementName=NrColorStrength}"/>
+                  </DockPanel>
+                  <Slider x:Name="NrColorStrength" Style="{StaticResource NrSlider}" Maximum="2" Value="1"/>
+                </StackPanel>
+              </Grid>
+            </StackPanel>
+          </Border>
+
+          <Border Style="{StaticResource Card}">
+            <StackPanel>
+              <TextBlock Text="Detail and stability" Style="{StaticResource NrHeading}"/>
+              <Grid>
+                <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="24"/><ColumnDefinition/></Grid.ColumnDefinitions>
+                <StackPanel>
+                  <CheckBox x:Name="NrTextureBoost" Content="Texture Boost" Margin="0,0,0,9"/>
+                  <DockPanel>
+                    <TextBlock DockPanel.Dock="Right" Foreground="{StaticResource Accent}"
+                               Text="{Binding Value, ElementName=NrTextureBoostStrength, StringFormat={}{0:0.00}}"/>
+                    <Label Content="Texture Boost strength" Target="{Binding ElementName=NrTextureBoostStrength}"/>
+                  </DockPanel>
+                  <Slider x:Name="NrTextureBoostStrength" Style="{StaticResource NrSlider}" Maximum="1" Value="1" IsEnabled="{Binding IsChecked, ElementName=NrTextureBoost}"/>
+                  <CheckBox x:Name="NrMotionStability" Content="Motion Stability" Margin="0,0,0,9"/>
+                </StackPanel>
+                <StackPanel Grid.Column="2">
+                  <CheckBox x:Name="NrMultiPassCleanup" Content="Multi-pass cleanup" Margin="0,0,0,9"/>
+                  <DockPanel>
+                    <TextBlock DockPanel.Dock="Right" Foreground="{StaticResource Accent}"
+                               Text="{Binding Value, ElementName=NrCleanupStrength, StringFormat={}{0:0.00}}"/>
+                    <Label Content="Cleanup strength" Target="{Binding ElementName=NrCleanupStrength}"/>
+                  </DockPanel>
+                  <Slider x:Name="NrCleanupStrength" Style="{StaticResource NrSlider}" Maximum="1" Value="0.5" IsEnabled="{Binding IsChecked, ElementName=NrMultiPassCleanup}"/>
+                  <DockPanel>
+                    <TextBlock DockPanel.Dock="Right" Foreground="{StaticResource Accent}"
+                               Text="{Binding Value, ElementName=NrDetailRetention, StringFormat={}{0:0.00}}"/>
+                    <Label Content="Detail retention" Target="{Binding ElementName=NrDetailRetention}"/>
+                  </DockPanel>
+                  <Slider x:Name="NrDetailRetention" Style="{StaticResource NrSlider}" Maximum="1" Value="0.75" IsEnabled="{Binding IsChecked, ElementName=NrMultiPassCleanup}"/>
+                </StackPanel>
+              </Grid>
+            </StackPanel>
+          </Border>
+        </StackPanel>
+      </ScrollViewer>
+
       <Grid x:Name="AchievementsPage" Visibility="Collapsed">
         <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
         <DockPanel Margin="0,0,0,15">
           <Button x:Name="LoadAchievements" Content="Refresh" DockPanel.Dock="Right" Margin="10,0,0,0" VerticalAlignment="Top"/>
           <StackPanel><TextBlock Text="Achievements" Style="{StaticResource Title}" Margin="0"/><TextBlock x:Name="AchievementSummary" Foreground="{StaticResource Accent}" Margin="0,4,0,0"/></StackPanel>
         </DockPanel>
-        <ListBox Grid.Row="1" x:Name="AchievementList" Background="#C0181616" BorderBrush="{StaticResource Outline}"
+        <ListBox Grid.Row="1" x:Name="AchievementList" Background="#58181616" BorderBrush="{StaticResource Outline}"
                  Foreground="#F8F2F0" ScrollViewer.HorizontalScrollBarVisibility="Disabled" AutomationProperties.Name="Achievements">
           <ListBox.ItemContainerStyle><Style TargetType="ListBoxItem"><Setter Property="HorizontalContentAlignment" Value="Stretch"/><Setter Property="Foreground" Value="#F8F2F0"/></Style></ListBox.ItemContainerStyle>
           <ListBox.ItemTemplate>
@@ -345,7 +563,7 @@
       </Grid>
     </Grid>
 
-    <Border Grid.Row="1" Grid.ColumnSpan="2" Background="#EA1A161A" BorderBrush="{StaticResource Outline}" BorderThickness="0,1,0,0" Padding="19,12">
+    <Border Grid.Row="1" Grid.ColumnSpan="2" Background="#6A1A161A" BorderBrush="{StaticResource Outline}" BorderThickness="0,1,0,0" Padding="19,12">
       <DockPanel>
         <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
           <CheckBox x:Name="Collector" Content="Gameplay collector" Margin="0,0,17,0"

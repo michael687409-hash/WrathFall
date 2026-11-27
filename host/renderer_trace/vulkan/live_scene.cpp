@@ -8,6 +8,7 @@
 
 #include <Windows.h>
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <cwchar>
@@ -59,6 +60,15 @@ std::ofstream& Log() {
   };
   static auto stream = open();
   return stream;
+}
+
+void FlushFrameLog() {
+  using Clock = std::chrono::steady_clock;
+  static thread_local auto next_flush = Clock::now();
+  const auto now = Clock::now();
+  if (now < next_flush) return;
+  next_flush = now + std::chrono::milliseconds(250);
+  Log().flush();
 }
 
 // Lives on the Vulkan command processor thread and is released after GPU idle.
@@ -257,6 +267,8 @@ void Device(VkPhysicalDevice physical, VkDevice device, PFN_vkGetDeviceProcAddr 
 }
 
 void Shutdown(const rex::gpu::vulkan::VulkanCommandProcessor& processor) {
+  if (temporal) temporal->ReportCompleted(Log());
+  Log().flush();
   fsr_probe.reset();
   temporal.reset();
   if (!capture.memory) return;
@@ -496,6 +508,7 @@ void ReadInterlockInputs(const rex::gpu::vulkan::VulkanCommandProcessor& process
 
 void Present(uint64_t frame, uint32_t frontbuffer, uint32_t width, uint32_t height) {
   if (!Enabled()) return;
+  FlushFrameLog();
   auto& evidence = Evidence(frame);
   static thread_local unsigned scene_frames;
   if (!evidence.compositor && !evidence.depth_resolved && !evidence.motion_draws) return;
@@ -527,7 +540,7 @@ void Present(uint64_t frame, uint32_t frontbuffer, uint32_t width, uint32_t heig
         << "\tprojection=";
     for (float value : evidence.camera) log << value << ',';
   }
-  log << std::endl;
+  log << '\n';
 }
 
 }  // namespace wrathfall::vulkan_live

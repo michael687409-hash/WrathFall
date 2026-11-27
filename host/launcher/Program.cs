@@ -44,12 +44,13 @@ namespace AsurasWrath.Launcher
 
     internal sealed class LauncherWindow
     {
-        private static readonly string[] Pages = { "Play", "Setup", "Graphics", "Achievements" };
+        private static readonly string[] Pages = { "Play", "Setup", "Graphics", "DlssNr", "Achievements" };
         private static readonly string[] ComboNames = { "Renderer", "Resolution", "DisplayMode", "DisplayMonitor", "FrameRate",
             "Upscaler", "DlssPreset", "AntiAliasing", "TextureFiltering" };
         private static readonly string[] CheckNames = { "VSync", "Collector" };
-        private static readonly string[] JobButtons = { "ChooseDisc", "ChooseUpdate", "ChooseDlc", "ResetGraphics" };
+        private static readonly string[] JobButtons = { "ChooseDisc", "ChooseUpdate", "ChooseDlc" };
         private readonly Project project;
+        private readonly DlssNrPassPreview[] nrPasses = new DlssNrPassPreview[30];
         private bool TemporalAvailable { get { return !string.IsNullOrEmpty(Selected("Upscaler")); } }
         private readonly DispatcherTimer timer;
         private BackgroundJob job;
@@ -94,6 +95,7 @@ namespace AsurasWrath.Launcher
                 Log("Could not load launcher settings. " + error.Message);
             }
             Apply(initial);
+            SetUpDlssNrPreview();
             foreach (string name in ComboNames.Where(name => name != "Resolution" && name != "DisplayMode" &&
                 name != "DisplayMonitor" && name != "Renderer"))
                 Control<ComboBox>(name).SelectionChanged += delegate { GraphicsChanged(); };
@@ -162,11 +164,6 @@ namespace AsurasWrath.Launcher
                 GraphicsSettings settings = ReadGraphics();
                 Save();
                 Start("Running game", "Build.ps1", settings.Arguments("Run", TemporalAvailable).ToArray(), null, true);
-            });
-            On("ResetGraphics", delegate
-            {
-                Apply(new GraphicsSettings { GameplayCollectorEnabled = Check("Collector") });
-                GraphicsChanged();
             });
             On("LoadAchievements", delegate
             {
@@ -319,6 +316,79 @@ namespace AsurasWrath.Launcher
             };
         }
 
+        private void SetUpDlssNrPreview()
+        {
+            var passCount = Control<Slider>("NrPassCount");
+            var passSelector = Control<ComboBox>("NrPassSelector");
+            passSelector.SelectionChanged += delegate
+            {
+                if (passSelector.SelectedIndex >= 0) ShowDlssNrPass(passSelector.SelectedIndex);
+            };
+            passCount.ValueChanged += delegate { UpdateDlssNrPasses(); };
+            Control<ComboBox>("NrPlacement").SelectionChanged += delegate { UpdateDlssNrResolution(ReadGraphics().OutputResolution); };
+            Control<Slider>("NrWorkScale").ValueChanged += delegate { UpdateDlssNrResolution(ReadGraphics().OutputResolution); };
+            On("NrResetPass", delegate
+            {
+                int pass = passSelector.SelectedIndex;
+                nrPasses[pass] = new DlssNrPassPreview();
+                ShowDlssNrPass(pass);
+            });
+            UpdateDlssNrPasses();
+        }
+
+        private void UpdateDlssNrPasses()
+        {
+            var selector = Control<ComboBox>("NrPassSelector");
+            int count = (int)Control<Slider>("NrPassCount").Value;
+            int selected = Math.Max(0, Math.Min(selector.SelectedIndex, count - 1));
+            selector.ItemsSource = Enumerable.Range(1, count).Select(pass => "Pass " + pass).ToArray();
+            selector.SelectedIndex = selected;
+        }
+
+        private void ShowDlssNrPass(int pass)
+        {
+            if (nrPasses[pass] == null) nrPasses[pass] = new DlssNrPassPreview();
+            Control<FrameworkElement>("NrPassControls").DataContext = nrPasses[pass];
+        }
+
+        private void UpdateDlssNrResolution(string output)
+        {
+            bool upstream = Control<ComboBox>("NrPlacement").SelectedIndex == 1;
+            string[] extent = (upstream ? "1280x720" : output).Split('x');
+            int width, height;
+            if (extent.Length != 2 || !int.TryParse(extent[0], out width) || !int.TryParse(extent[1], out height))
+            {
+                SetText("NrWorkSize", "Select an output resolution in Graphics.");
+                return;
+            }
+            double scale = Control<Slider>("NrWorkScale").Value / 100;
+            SetText("NrWorkSize", string.Format(CultureInfo.CurrentCulture, "{0:0} × {1:0} estimated",
+                width * scale, height * scale));
+        }
+
+        private sealed class DlssNrPassPreview
+        {
+            public int Model { get; set; }
+            public int Style { get; set; }
+            public int Depth { get; set; }
+            public double Intensity { get; set; }
+            public double LocalTone { get; set; }
+            public double GlobalTone { get; set; }
+            public double LocalStructure { get; set; }
+            public double SkinDetail { get; set; }
+            public bool AutoMask { get; set; }
+            public bool UiCorrection { get; set; }
+            public double MotionX { get; set; }
+            public double MotionY { get; set; }
+
+            internal DlssNrPassPreview()
+            {
+                Intensity = 1;
+                LocalTone = GlobalTone = LocalStructure = SkinDetail = 2;
+                MotionX = MotionY = 1;
+            }
+        }
+
         private void GraphicsChanged()
         {
             if (applying) return;
@@ -385,6 +455,7 @@ namespace AsurasWrath.Launcher
             bool ready = disc && update;
             int dlc = project.DlcCount();
             GraphicsSettings graphics = ReadGraphics();
+            UpdateDlssNrResolution(graphics.OutputResolution);
             string upscaler = graphics.ActiveUpscaler(TemporalAvailable);
             bool cache = project.HasShaderCache(graphics.RuntimeRenderer, upscaler != "native");
             bool original = graphics.OutputResolution == "1280x720";
@@ -403,8 +474,9 @@ namespace AsurasWrath.Launcher
             build.Content = built ? "Installed" : "Build";
             build.Tag = built ? "installed" : null;
             Control<Button>("PrepareShaders").IsEnabled = available && ready && built && cache;
-            bool prepared = cache && project.ShadersPrepared(graphics, TemporalAvailable);
-            Control<Button>("PrepareShaders").Content = prepared ? "Recompile Shaders" : "Precompile Shaders";
+            var preparation = project.ShaderPreparationStatus(graphics, TemporalAvailable);
+            Control<Button>("PrepareShaders").Content = preparation == ShaderPreparation.Missing
+                ? "Precompile Shaders" : "Recompile Shaders";
             Control<Button>("LoadAchievements").IsEnabled = available && (ready || File.Exists(project.Catalog));
             Control<Button>("LoadAchievements").Content = File.Exists(project.Catalog) ? "Refresh" : "Load achievements";
             Control<Button>("Play").IsEnabled = available && ready && built;
@@ -420,8 +492,10 @@ namespace AsurasWrath.Launcher
                 ? "Disc and title update verified. Select Build to create your PC installation."
                 : "Import your Xbox 360 disc and matching title update to continue.");
             Visible("GoSetup", !ready);
-            SetText("CacheState", prepared ? "Recorded shaders prepared for this renderer." :
-                cache ? "Recorded shaders are ready to precompile." : "Play the game to record shaders for precompilation.");
+            SetText("CacheState", !cache ? "Play the game to record shaders for precompilation." :
+                preparation == ShaderPreparation.Current ? "Recorded shaders prepared for this renderer." :
+                preparation == ShaderPreparation.Stale ? "Shader preparation is out of date. Recompile shaders." :
+                "Recorded shaders are ready to precompile.");
             SetText("Status", status ?? (ready && built ? "Ready to play" : ready ? "Ready to build" : "Setup required"));
             SetText("StatusDetail", !available ? "See Activity for output" : !ready ? "Import the disc and title update"
                 : !built ? "Build the PC version in Game files"

@@ -27,6 +27,21 @@ reactivity. The expected camera constant offsets are 0, 64, 72, 80, 88, 92,
 96, 100, and 112 bytes. The probe's test uses synthetic depth and motion
 inputs. Live Vulkan shader dispatch and camera inputs need in-game validation.
 
+## Offscreen motion baseline
+
+Build the probe with glslang to compile the same motion shader that the live
+renderer uses. This test runs on a Vulkan GPU with synthetic 720p frames.
+
+```powershell
+./Build-Probe.ps1 -VulkanInclude <headers> -OutputDirectory <build> -GlslangValidator <glslangValidator.exe>
+<build>/temporal_probe.exe motion <build>/live-motion.spv
+```
+
+The probe reads back motion vectors and the reactive mask. It checks a static
+scene, a known camera pan, separate object motion, and reset behavior on the
+first frame, after a camera cut, after a frame gap, and when a camera is
+reacquired. The probe and live renderer use the same history-reset decision.
+
 ## Live renderer integration
 
 The experimental renderer target builds the pinned ReXGlue 0.11.0 Vulkan
@@ -34,10 +49,14 @@ driver. Configure this directory with `project_tools`, `vulkan_include`,
 `vma_include`, `glslang_source`, and the installed `rexglue_DIR`. The
 verified dependencies are Vulkan-Headers 1.4.313, VMA 3.3.0, and glslang at
 `f4f1d8a352ca1908943aea2ad8c54b39b4879080`, the SDK's pinned submodule.
-glslang needs Python for its build metadata. Build `asura_vulkan` in Release. Copy the resulting `rexgpu-xenos-vulkan.dll` to `out/vulkan-upscalers/` and rebuild the launcher. With the matching vendor runtime installed, choose **Vulkan (experimental upscaling)** in Graphics, then choose 2560 × 1440 and an upscaler.
+glslang needs Python for its build metadata. Build `asura_vulkan` in Release.
 
 Set `WRATHFALL_VK_SCENE_TRACE` to a trace file for draw, resolve, and present
-evidence. `WRATHFALL_VK_DLSS_PROBE_RUNTIME` points to the signed Streamline
+evidence. On a queue that supports timestamps, `gpu-timing` rows record the
+elapsed GPU time in milliseconds for input unpacking, motion estimation,
+upscaling, HUD composition, and history storage. These cover the temporal
+passes and their barriers. The guest frame number is the second column.
+`WRATHFALL_VK_DLSS_PROBE_RUNTIME` points to the signed Streamline
 directory. The Vulkan instance enables Streamline's extensions before device
 creation, and the device enables the reported Vulkan 1.2/1.3 features. It
 then binds preset K at 1280 × 720 to 2560 × 1440. Set
