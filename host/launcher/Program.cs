@@ -24,30 +24,38 @@ namespace AsurasWrath.Launcher
         [STAThread]
         public static int Main(string[] args)
         {
-            bool playWorker = args.Length != 0 && args[0] == GameLaunch.WorkerCommand;
-            bool shaderWorker = args.Length != 0 && args[0] == GameLaunch.ShaderWorkerCommand;
-            bool importWorker = args.Length != 0 && args[0] == GameImport.WorkerCommand;
+            string command = args.Length == 0 ? null : args[0];
+            bool projectTool = ProjectTools.Handles(command);
+            bool worker = projectTool || command == GameLaunch.WorkerCommand || command == GameLaunch.ShaderWorkerCommand ||
+                command == GameImport.WorkerCommand || command == GameLaunch.CollectCommand;
+            var stdout = GetStdHandle(-11);
+            if (worker && (stdout == IntPtr.Zero || stdout == new IntPtr(-1))) AttachConsole(uint.MaxValue);
             try
             {
                 string root = AppDomain.CurrentDomain.BaseDirectory;
                 string engine = Path.Combine(root, "engine");
-                if (File.Exists(Path.Combine(engine, "Build.ps1"))) root = engine;
-                if (!File.Exists(Path.Combine(root, "Build.ps1")))
+                if (File.Exists(Path.Combine(engine, Project.InstallManifest))) root = engine;
+                if (!File.Exists(Path.Combine(root, Project.InstallManifest)))
                     throw new FileNotFoundException("Extract the complete download before opening the launcher.");
                 var project = new Project(root);
-                if (playWorker) return GameLaunch.Run(project, args);
-                if (shaderWorker) return GameLaunch.PrepareShaders(project, args);
-                if (importWorker) return GameImport.Run(project, args);
+                if (projectTool) return ProjectTools.Run(project, args);
+                if (command == GameLaunch.WorkerCommand) return GameLaunch.Run(project, args);
+                if (command == GameLaunch.ShaderWorkerCommand) return GameLaunch.PrepareShaders(project, args);
+                if (command == GameImport.WorkerCommand) return GameImport.Run(project, args);
+                if (command == GameLaunch.CollectCommand) return GameLaunch.Collect(project);
                 return new Application().Run(new LauncherWindow(project).Window);
             }
             catch (Exception error)
             {
-                if (playWorker || shaderWorker || importWorker) Console.Error.WriteLine(error.Message);
+                if (worker) Console.Error.WriteLine(error.Message);
                 else MessageBox.Show(error.GetBaseException().Message, "WrathFall",
                     MessageBoxButton.OK, MessageBoxImage.Error);
                 return 1;
             }
         }
+
+        [DllImport("kernel32.dll")] private static extern IntPtr GetStdHandle(int handle);
+        [DllImport("kernel32.dll")] private static extern bool AttachConsole(uint processId);
     }
 
     internal sealed class LauncherWindow
@@ -154,7 +162,7 @@ namespace AsurasWrath.Launcher
             On("ImportDlss", ImportDlss);
             On("BuildPc", delegate
             {
-                if (!project.IsBuilt) Start("Building PC version", "Build.ps1", new[] { "-Stage", "Build" });
+                if (!project.IsBuilt) Start("Building PC version", ProjectTools.BuildCommand);
             });
             On("PrepareShaders", delegate
             {
@@ -164,6 +172,7 @@ namespace AsurasWrath.Launcher
             On("Play", delegate
             {
                 if (job != null) return;
+                long click = Stopwatch.GetTimestamp();
                 applying = true;
                 try
                 {
@@ -173,12 +182,12 @@ namespace AsurasWrath.Launcher
                 finally { applying = false; }
                 GraphicsSettings settings = ReadGraphics();
                 Save();
-                BeginJob(BackgroundJob.StartGame(project, settings));
+                BeginJob(BackgroundJob.StartGame(project, settings, click));
             });
             On("LoadAchievements", delegate
             {
                 if (File.Exists(project.Catalog)) LoadAchievements();
-                else Start("Loading achievements", "Build.ps1", new[] { "-Stage", "Achievements" });
+                else Start("Loading achievements", ProjectTools.AchievementsCommand);
             });
 
             timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(450) };
@@ -490,8 +499,7 @@ namespace AsurasWrath.Launcher
             Control<Button>("LoadAchievements").IsEnabled = available && (ready || File.Exists(project.Catalog));
             Control<Button>("LoadAchievements").Content = File.Exists(project.Catalog) ? "Refresh" : "Load achievements";
             Control<Button>("Play").IsEnabled = available && ready && built;
-            Visible("DlssSetup", File.Exists(Path.Combine(project.Root, "Install-DlssRuntime.ps1")) &&
-                !Control<ComboBox>("Upscaler").Items.Cast<ComboBoxItem>().Any(item => (string)item.Tag == "dlss"));
+            Visible("DlssSetup", !Control<ComboBox>("Upscaler").Items.Cast<ComboBoxItem>().Any(item => (string)item.Tag == "dlss"));
             Control<Button>("ImportDlss").IsEnabled = available;
 
             SetText("DiscState", disc ? "Disc files found" : "Select an ISO or a 7z archive");
@@ -527,14 +535,14 @@ namespace AsurasWrath.Launcher
             var dialog = new OpenFileDialog { Filter = "NVIDIA Streamline SDK (*.zip)|*.zip", CheckFileExists = true };
             if (dialog.ShowDialog(Window) != true) return;
             string input = project.SaveImportSelection(dialog.FileNames);
-            try { Start("Installing DLSS runtime", "Install-DlssRuntime.ps1", new[] { "-PathsFile", input }, input); }
+            try { BeginJob(BackgroundJob.StartWorker(project, "Installing DLSS runtime", new[] { ProjectTools.InstallDlssCommand, input }, input)); }
             catch { DeleteSelection(input); throw; }
         }
 
-        private void Start(string title, string script, string[] arguments, string input = null)
+        private void Start(string title, string command)
         {
             if (job != null) return;
-            BeginJob(BackgroundJob.Start(project.Root, title, script, arguments, input));
+            BeginJob(BackgroundJob.StartWorker(project, title, new[] { command }));
         }
 
         private void BeginJob(BackgroundJob started)

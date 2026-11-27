@@ -7,6 +7,7 @@
 #include <winrt/Windows.Graphics.Capture.h>
 #include <winrt/Windows.Graphics.DirectX.Direct3D11.h>
 
+#include "frame_clock.h"
 #include "upscaler_events.h"
 
 #include <algorithm>
@@ -54,6 +55,10 @@ struct Frame {
   int64_t time = 0;
   std::vector<uint32_t> pixels;
   unsigned segment = 0;
+  int64_t compositor_time = 0;
+  int64_t copy_begin = 0;
+  int64_t copy_submitted = 0;
+  int64_t readback_finished = 0;
 };
 
 using Snapshot = std::shared_ptr<const Frame>;
@@ -62,6 +67,7 @@ struct CaptureTick {
   int64_t compositor_time;  // 100 ns units, relative to the performance counter.
   int64_t unix_ms;
   unsigned segment;
+  int64_t received_time = 0;
 };
 
 struct CaptureBatch {
@@ -259,6 +265,86 @@ Findings Inspect(const Frame& frame) {
   return result;
 }
 
+class ReadbackQueue {
+ public:
+  ReadbackQueue(ID3D11Device& device, ID3D11DeviceContext& context)
+      : device_(device), context_(context) {}
+
+  bool Pending() const { return count_ != 0; }
+  bool CanQueue(bool requested) const {
+    // Periodic analysis leaves one slot available for L and fallback reports.
+    return count_ < slots_.size() - (requested ? 0 : 1);
+  }
+
+  void Queue(ID3D11Texture2D& source, winrt::Windows::Graphics::SizeInt32 size, CaptureTick tick) {
+    auto& slot = slots_[(head_ + count_) % slots_.size()];
+    D3D11_TEXTURE2D_DESC desc{};
+    source.GetDesc(&desc);
+    if (!slot.texture || slot.width != desc.Width || slot.height != desc.Height) {
+      slot.texture = nullptr;
+      desc.Usage = D3D11_USAGE_STAGING;
+      desc.BindFlags = 0;
+      desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+      desc.MiscFlags = 0;
+      winrt::check_hresult(device_.CreateTexture2D(&desc, nullptr, slot.texture.put()));
+      slot.width = desc.Width;
+      slot.height = desc.Height;
+    }
+    slot.frame = std::make_shared<Frame>();
+    slot.frame->width = static_cast<uint32_t>(size.Width);
+    slot.frame->height = static_cast<uint32_t>(size.Height);
+    slot.frame->time = tick.unix_ms;
+    slot.frame->segment = tick.segment;
+    slot.frame->compositor_time = tick.compositor_time;
+    slot.frame->copy_begin = asura::frame_clock::Now100ns();
+    context_.CopyResource(slot.texture.get(), &source);
+    // There may be no later graphics calls to submit the copy when the window goes idle.
+    context_.Flush();
+    slot.frame->copy_submitted = asura::frame_clock::Now100ns();
+    ++count_;
+  }
+
+  Snapshot TakeReady() {
+    if (!Pending()) return {};
+    auto& slot = slots_[head_];
+    D3D11_MAPPED_SUBRESOURCE mapped{};
+    const HRESULT result = context_.Map(slot.texture.get(), 0, D3D11_MAP_READ,
+                                        D3D11_MAP_FLAG_DO_NOT_WAIT, &mapped);
+    if (result == DXGI_ERROR_WAS_STILL_DRAWING) return {};
+    winrt::check_hresult(result);
+    auto& frame = *slot.frame;
+    try {
+      frame.pixels.resize(size_t(frame.width) * frame.height);
+      for (uint32_t y = 0; y < frame.height; ++y) {
+        const auto* row = reinterpret_cast<const uint32_t*>(
+            static_cast<const uint8_t*>(mapped.pData) + size_t(y) * mapped.RowPitch);
+        std::transform(row, row + frame.width, frame.pixels.begin() + size_t(y) * frame.width,
+                       [](uint32_t pixel) { return pixel | 0xFF000000; });
+      }
+    } catch (...) {
+      context_.Unmap(slot.texture.get(), 0);
+      throw;
+    }
+    context_.Unmap(slot.texture.get(), 0);
+    frame.readback_finished = asura::frame_clock::Now100ns();
+    head_ = (head_ + 1) % slots_.size();
+    --count_;
+    return std::move(slot.frame);
+  }
+
+ private:
+  struct Slot {
+    winrt::com_ptr<ID3D11Texture2D> texture;
+    uint32_t width = 0, height = 0;
+    std::shared_ptr<Frame> frame;
+  };
+
+  ID3D11Device& device_;
+  ID3D11DeviceContext& context_;
+  std::array<Slot, 3> slots_{};
+  size_t head_ = 0, count_ = 0;
+};
+
 class WindowCapture {
  public:
   explicit WindowCapture(HWND window) : window_(window) {
@@ -308,19 +394,27 @@ class WindowCapture {
   }
 
   void RequestSnapshot() { snapshot_requested_ = true; }
+  void Stop() {
+    worker_.request_stop();
+    worker_.join();
+  }
 
  private:
   void ReadFrames(std::stop_token stop, HANDLE ready) {
-    LARGE_INTEGER counter{}, frequency{};
-    QueryPerformanceFrequency(&frequency);
-    QueryPerformanceCounter(&counter);
-    const auto epoch_offset = EpochMilliseconds() -
-        static_cast<int64_t>(1000.0 * counter.QuadPart / frequency.QuadPart);
+    const auto epoch_offset = EpochMilliseconds() - asura::frame_clock::Now100ns() / 10000;
+    ReadbackQueue readbacks(*device_, *context_);
+    const auto publish_images = [&] {
+      while (auto image = readbacks.TakeReady()) {
+        std::lock_guard lock(mutex_);
+        batch_.images.push_back(std::move(image));
+        if (batch_.images.size() > 3) batch_.images.pop_front();
+      }
+    };
     bool active = false;
     unsigned segment = 0;
     int64_t next_image = 0;
     while (!stop.stop_requested()) {
-      WaitForSingleObject(ready, 50);
+      WaitForSingleObject(ready, readbacks.Pending() ? 4 : 50);
       const bool foreground = GetForegroundWindow() == window_;
       if (foreground != active) {
         active = foreground;
@@ -336,71 +430,44 @@ class WindowCapture {
           captured.Close();
           size_ = size;
           pool_.Recreate(graphics_device_, DirectXPixelFormat::B8G8R8A8UIntNormalized, 2, size_);
-          staging_ = nullptr;
           ++segment;
           next_image = 0;
           continue;
         }
         const auto stamp = captured.SystemRelativeTime().count();
         if (stamp <= 0) continue;
-        const bool requested = snapshot_requested_.exchange(false);
+        const bool requested = snapshot_requested_.load();
         if (!active && !requested) continue;
-        const auto unix_ms = epoch_offset + stamp / 10000;
-        Snapshot image;
-        if (requested || stamp >= next_image) {
-          next_image = stamp + 2000000;  // 200 ms. Keep expensive pixel readbacks at about 5 Hz.
-          image = ReadImage(captured, size, unix_ms, segment);
+        const CaptureTick tick{stamp, epoch_offset + stamp / 10000, segment,
+                               asura::frame_clock::Now100ns()};
+        if (active) {
+          std::lock_guard lock(mutex_);
+          batch_.ticks.push_back(tick);
+          if (batch_.ticks.size() > 1024) batch_.ticks.pop_front();
         }
-        std::lock_guard lock(mutex_);
-        if (active) batch_.ticks.push_back({stamp, unix_ms, segment});
-        if (batch_.ticks.size() > 1024) batch_.ticks.pop_front();
-        if (image) {
-          batch_.images.push_back(std::move(image));
-          if (batch_.images.size() > 3) batch_.images.pop_front();
+        if ((requested || stamp >= next_image) && readbacks.CanQueue(requested)) {
+          if (requested) snapshot_requested_.exchange(false);
+          next_image = stamp + 2000000;  // 200 ms. Keep expensive pixel readbacks at about 5 Hz.
+          auto access = captured.Surface().as<
+              ::Windows::Graphics::DirectX::Direct3D11::IDirect3DDxgiInterfaceAccess>();
+          winrt::com_ptr<ID3D11Texture2D> source;
+          winrt::check_hresult(access->GetInterface(__uuidof(ID3D11Texture2D), source.put_void()));
+          readbacks.Queue(*source, size, tick);
         }
       }
+      publish_images();
     }
-  }
-
-  Snapshot ReadImage(const capture::Direct3D11CaptureFrame& captured,
-                     winrt::Windows::Graphics::SizeInt32 size, int64_t unix_ms, unsigned segment) {
-    auto access = captured.Surface().as<
-        ::Windows::Graphics::DirectX::Direct3D11::IDirect3DDxgiInterfaceAccess>();
-    winrt::com_ptr<ID3D11Texture2D> source;
-    winrt::check_hresult(access->GetInterface(__uuidof(ID3D11Texture2D), source.put_void()));
-    if (!staging_) {
-      D3D11_TEXTURE2D_DESC desc{};
-      source->GetDesc(&desc);
-      desc.Usage = D3D11_USAGE_STAGING;
-      desc.BindFlags = 0;
-      desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-      desc.MiscFlags = 0;
-      winrt::check_hresult(device_->CreateTexture2D(&desc, nullptr, staging_.put()));
+    // Give already-queued screenshots a short drain window if the game just exited.
+    const auto deadline = Clock::now() + 24ms;
+    while (readbacks.Pending() && Clock::now() < deadline) {
+      publish_images();
+      if (readbacks.Pending()) Sleep(1);
     }
-    auto frame = std::make_shared<Frame>();
-    frame->width = static_cast<uint32_t>(size.Width);
-    frame->height = static_cast<uint32_t>(size.Height);
-    frame->time = unix_ms;
-    frame->segment = segment;
-    frame->pixels.resize(frame->width * frame->height);
-
-    context_->CopyResource(staging_.get(), source.get());
-    D3D11_MAPPED_SUBRESOURCE mapped{};
-    winrt::check_hresult(context_->Map(staging_.get(), 0, D3D11_MAP_READ, 0, &mapped));
-    for (uint32_t y = 0; y < frame->height; ++y) {
-      const auto* row = reinterpret_cast<const uint32_t*>(
-          static_cast<const uint8_t*>(mapped.pData) + size_t(y) * mapped.RowPitch);
-      std::transform(row, row + frame->width, frame->pixels.begin() + size_t(y) * frame->width,
-                     [](uint32_t pixel) { return pixel | 0xFF000000; });
-    }
-    context_->Unmap(staging_.get(), 0);
-    return frame;
   }
 
   HWND window_;
   winrt::com_ptr<ID3D11Device> device_;
   winrt::com_ptr<ID3D11DeviceContext> context_;
-  winrt::com_ptr<ID3D11Texture2D> staging_;
   IDirect3DDevice graphics_device_{nullptr};
   capture::GraphicsCaptureItem item_{nullptr};
   capture::Direct3D11CaptureFramePool pool_{nullptr};
@@ -561,6 +628,7 @@ void CopyLogTail(const fs::path& project, const fs::path& output) {
 struct FrameTiming {
   int64_t time;
   double milliseconds;
+  int64_t compositor_time = 0;
 };
 
 struct PacingIssue {
@@ -579,7 +647,8 @@ class FramePacing {
     }
     if (tick.compositor_time <= previous_->compositor_time) return {};
     const FrameTiming sample{tick.unix_ms,
-                             (tick.compositor_time - previous_->compositor_time) / 10000.0};
+                             (tick.compositor_time - previous_->compositor_time) / 10000.0,
+                             tick.compositor_time};
     history_.push_back(sample);
     while (previous_->unix_ms - history_.front().time > 2500 || history_.size() > 1024) {
       history_.pop_front();
@@ -698,9 +767,10 @@ void SaveMark(ScreenshotWriter& screenshots, const fs::path& project, const fs::
   if (!mark.timings.empty()) {
     info << "frame_timing_source=windows_graphics_capture_compositor\n";
     std::ofstream timings(output / "frame-times.csv");
-    timings << "unix_ms,relative_to_mark_ms,frame_time_ms\n";
+    timings << "unix_ms,relative_to_mark_ms,frame_time_ms,compositor_qpc_100ns\n";
     for (const auto& sample : mark.timings) {
-      timings << sample.time << ',' << sample.time - mark.time << ',' << sample.milliseconds << '\n';
+      timings << sample.time << ',' << sample.time - mark.time << ',' << sample.milliseconds
+              << ',' << sample.compositor_time << '\n';
     }
   }
   if (mark.pacing.reason) {
@@ -889,9 +959,16 @@ void Collect(const fs::path& project, DWORD pid, HWND window, HANDLE process, bo
     std::ofstream info(session / "session.txt");
     info << "renderer=" << graphics.renderer << "\nupscaler=" << graphics.upscaler
          << "\npid=" << pid << "\nsource=windows_graphics_capture_game_window\n";
+    const auto trace = asura::frame_clock::VulkanTraceFile(project / "out" / "logs", pid, process);
+    if (graphics.renderer == "vulkan" || fs::exists(trace)) {
+      info << "vulkan_frame_trace=" << trace.filename().string() << '\n';
+    }
   }
+  std::ofstream capture_log(session / "capture-timing.csv");
+  capture_log << "unix_ms,segment,compositor_qpc_100ns,received_qpc_100ns\n";
   std::ofstream quality_log(session / "frame-quality.csv");
-  quality_log << "unix_ms,width,height,segment,sharpness_ratio,edge_samples,ghost_trail_tiles,blur_candidate,ghosting_candidate\n";
+  quality_log << "unix_ms,width,height,segment,sharpness_ratio,edge_samples,ghost_trail_tiles,blur_candidate,ghosting_candidate,"
+                 "compositor_qpc_100ns,copy_begin_qpc_100ns,copy_submitted_qpc_100ns,readback_finished_qpc_100ns\n";
   std::wprintf(L"Press L in the game to mark an anomaly. Reports go to\n%ls\n", session.c_str());
   std::fflush(stdout);
   std::deque<Snapshot> ring;
@@ -925,7 +1002,9 @@ void Collect(const fs::path& project, DWORD pid, HWND window, HANDLE process, bo
       quality.InspectFrame(*frame, last);
       quality_log << frame->time << ',' << frame->width << ',' << frame->height << ',' << frame->segment
                   << ',' << last.sharpness << ',' << last.edge_samples << ',' << last.ghost_tiles
-                  << ',' << last.blur << ',' << last.ghosting << '\n';
+                  << ',' << last.blur << ',' << last.ghosting << ',' << frame->compositor_time
+                  << ',' << frame->copy_begin << ',' << frame->copy_submitted
+                  << ',' << frame->readback_finished << '\n';
       for (auto& pending : marks) {
         if (pending.frames.size() < 7) pending.frames.push_back(frame);
         else pending.frames.back() = frame;
@@ -953,6 +1032,8 @@ void Collect(const fs::path& project, DWORD pid, HWND window, HANDLE process, bo
       }
     }
     for (const auto tick : batch.ticks) {
+      capture_log << tick.unix_ms << ',' << tick.segment << ',' << tick.compositor_time
+                  << ',' << tick.received_time << '\n';
       const auto sample = pacing.Add(tick);
       if (!sample) continue;
       for (auto& pending : marks) pending.timings.push_back(*sample);
@@ -995,6 +1076,7 @@ void Collect(const fs::path& project, DWORD pid, HWND window, HANDLE process, bo
     }
     Sleep(12);
   }
+  recorder.Stop();
   try {
     read_capture(false);
   } catch (const winrt::hresult_error&) {
@@ -1009,7 +1091,54 @@ void Collect(const fs::path& project, DWORD pid, HWND window, HANDLE process, bo
   for (const auto& pending : marks) SaveMark(screenshots, project, session, pending, ++written, pid);
 }
 
+void CheckReadbackQueue() {
+  winrt::com_ptr<ID3D11Device> device;
+  winrt::com_ptr<ID3D11DeviceContext> context;
+  winrt::check_hresult(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, nullptr, 0,
+      D3D11_SDK_VERSION, device.put(), nullptr, context.put()));
+  ReadbackQueue queue(*device, *context);
+  const auto schedule = [&](int32_t width, int32_t height, unsigned segment) {
+    const uint32_t color = 0x00704000 | segment;
+    std::vector<uint32_t> pixels(size_t(width) * height, color);
+    D3D11_TEXTURE2D_DESC desc{};
+    desc.Width = width;
+    desc.Height = height;
+    desc.MipLevels = 1;
+    desc.ArraySize = 1;
+    desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    desc.SampleDesc.Count = 1;
+    D3D11_SUBRESOURCE_DATA data{pixels.data(), UINT(width * sizeof(uint32_t)), 0};
+    winrt::com_ptr<ID3D11Texture2D> texture;
+    winrt::check_hresult(device->CreateTexture2D(&desc, &data, texture.put()));
+    queue.Queue(*texture, {width, height}, {asura::frame_clock::Now100ns(), 1000 + segment, segment});
+  };
+  const auto expect = [&](uint32_t width, uint32_t height, unsigned segment) {
+    Snapshot image;
+    const auto deadline = Clock::now() + 2s;
+    while (!(image = queue.TakeReady()) && Clock::now() < deadline) Sleep(1);
+    if (!image || image->width != width || image->height != height || image->segment != segment ||
+        image->pixels.size() != size_t(width) * height ||
+        !std::ranges::all_of(image->pixels, [&](uint32_t pixel) { return pixel == (0xFF704000 | segment); }) ||
+        image->compositor_time > image->copy_begin || image->copy_begin > image->copy_submitted ||
+        image->copy_submitted > image->readback_finished) {
+      throw std::runtime_error("Asynchronous capture readback was incomplete or out of order.");
+    }
+  };
+  schedule(2560, 1440, 1);
+  schedule(101, 73, 2);
+  if (queue.CanQueue(false) || !queue.CanQueue(true)) throw std::runtime_error("Snapshot reserve was lost.");
+  schedule(101, 73, 3);
+  if (queue.CanQueue(true)) throw std::runtime_error("Readback queue exceeded its capacity.");
+  expect(2560, 1440, 1);
+  schedule(101, 73, 4);
+  expect(101, 73, 2);
+  expect(101, 73, 3);
+  expect(101, 73, 4);
+  if (queue.Pending()) throw std::runtime_error("Readback queue did not drain.");
+}
+
 void SelfTest(const fs::path& output) {
+  CheckReadbackQueue();
   FramePacing pacing;
   CaptureTick tick{10000000, 1000, 1};
   (void)pacing.Add(tick);

@@ -44,6 +44,7 @@ namespace AsurasWrath.Launcher
 
     internal sealed class Project
     {
+        internal const string InstallManifest = "asuras_wrath_manifest.toml";
         private static readonly string[] LegacyResolutions = { "1280x720", "2560x1440", "3840x2160" };
         private static readonly JavaScriptSerializer Json = new JavaScriptSerializer();
         private readonly Dictionary<string, Tuple<long, long, string>> shaderDigests =
@@ -67,7 +68,7 @@ namespace AsurasWrath.Launcher
         internal bool IsBuilt { get { return File.Exists(GameExecutable); } }
         internal bool HasExperimentalVulkan
         {
-            get { return File.Exists(Path.Combine(Output, @"vulkan-upscalers\rexgpu-xenos-vulkan.dll")); }
+            get { return File.Exists(TemporalModule(true)); }
         }
 
         internal int DlcCount()
@@ -224,9 +225,9 @@ namespace AsurasWrath.Launcher
 
         internal string TemporalModule(bool vulkan)
         {
-            if (vulkan) return Path.Combine(Output, @"vulkan-upscalers\rexgpu-xenos-vulkan.dll");
-            string installed = Path.Combine(Root, @"runtime\upscalers\rexgpu-xenos-d3d12.dll");
-            return File.Exists(installed) ? installed : Path.Combine(Output, @"dlss-runtime\rexgpu-xenos-d3d12.dll");
+            string module = vulkan ? "rexgpu-xenos-vulkan.dll" : "rexgpu-xenos-d3d12.dll";
+            string installed = Path.Combine(Root, @"runtime\upscalers", module);
+            return File.Exists(installed) ? installed : Path.Combine(Output, vulkan ? "vulkan-upscalers" : "dlss-runtime", module);
         }
 
         internal string VendorRuntime(string provider)

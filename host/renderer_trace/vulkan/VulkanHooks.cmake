@@ -13,7 +13,7 @@ foreach(name command_processor render_target_cache)
   file(READ "${source}" ${name})
 endforeach()
 
-foreach(name vulkan_instance vulkan_device)
+foreach(name vulkan_instance vulkan_device vulkan_presenter)
   set(source "${xenos}/host/vulkan/${name}.cpp")
   set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${source}")
   file(READ "${source}" ${name})
@@ -121,6 +121,55 @@ set(hook [=[  // The frame ends even without presenting, otherwise per frame res
   }]=])
 replace_hook(command_processor "${anchor}" "${hook}")
 
+set(anchor [=[                                       u32 frontbuffer_height) {
+  REX_PROFILE_SCOPE("gpu");
+  vertex_buffers_in_sync_[0] = 0;]=])
+set(hook [=[                                       u32 frontbuffer_height) {
+  frame_trace::GuestSwap trace_swap(frame_current_);
+  REX_PROFILE_SCOPE("gpu");
+  vertex_buffers_in_sync_[0] = 0;]=])
+replace_hook(command_processor "${anchor}" "${hook}")
+
+set(anchor [=[  bool is_opening_frame = is_guest_command && !frame_open_;]=])
+set(hook [=[  bool is_opening_frame = is_guest_command && !frame_open_;
+  if (is_opening_frame) frame_trace::Point("guest-begin", frame_current_);]=])
+replace_hook(command_processor "${anchor}" "${hook}")
+
+set(anchor [=[  if (await_submission > submission_completed_) {
+    VkResult wait_result =
+        dfn.vkWaitForFences(device, static_cast<u32>(await_submission - submission_completed_),
+                            submissions_in_flight_fences_.data(), VK_TRUE, UINT64_MAX);]=])
+set(hook [=[  if (await_submission > submission_completed_) {
+    frame_trace::Span trace_wait("guest-fence-wait", frame_current_, await_submission);
+    VkResult wait_result =
+        dfn.vkWaitForFences(device, static_cast<u32>(await_submission - submission_completed_),
+                            submissions_in_flight_fences_.data(), VK_TRUE, UINT64_MAX);
+    trace_wait.Finish(wait_result);]=])
+replace_hook(command_processor "${anchor}" "${hook}")
+
+set(anchor [=[    pipeline_cache_->EndSubmission();]=])
+set(hook [=[    {
+      frame_trace::Span trace_pipeline("guest-pipelines", frame_current_, GetCurrentSubmission());
+      pipeline_cache_->EndSubmission();
+    }]=])
+replace_hook(command_processor "${anchor}" "${hook}")
+
+set(anchor [=[    VkResult submit_result;
+    {
+      gpu::vulkan::VulkanDevice::Queue::Acquisition queue_acquisition =
+          vulkan_device->AcquireQueue(vulkan_device->GetQueueFamilyGraphicsCompute(), 0);
+      submit_result = dfn.vkQueueSubmit(queue_acquisition.GetQueue(), 1, &submit_info, fence);
+    }]=])
+set(hook [=[    VkResult submit_result;
+    frame_trace::Span trace_submit("guest-submit", frame_current_, GetCurrentSubmission());
+    {
+      gpu::vulkan::VulkanDevice::Queue::Acquisition queue_acquisition =
+          vulkan_device->AcquireQueue(vulkan_device->GetQueueFamilyGraphicsCompute(), 0);
+      submit_result = dfn.vkQueueSubmit(queue_acquisition.GetQueue(), 1, &submit_info, fence);
+    }
+    trace_submit.Finish(submit_result);]=])
+replace_hook(command_processor "${anchor}" "${hook}")
+
 set(anchor [=[  UpdateDynamicState(viewport_info, primitive_polygonal, normalized_depth_control);]=])
 set(hook [=[
   if (wrathfall::vulkan_live::Enabled() && draw_resolution_scale_x == 1 &&
@@ -184,8 +233,11 @@ set(hook [=[
 replace_hook(command_processor "${anchor}" "${hook}")
 
 set(anchor [=[    deferred_command_buffer_.Execute(command_buffer.buffer);]=])
-set(hook [=[    deferred_command_buffer_.Execute(command_buffer.buffer);
-    wrathfall::vulkan_live::RecordTemporal(command_buffer.buffer);]=])
+set(hook [=[    {
+      frame_trace::Span trace_record("guest-record", frame_current_, GetCurrentSubmission());
+      deferred_command_buffer_.Execute(command_buffer.buffer);
+      wrathfall::vulkan_live::RecordTemporal(command_buffer.buffer);
+    }]=])
 replace_hook(command_processor "${anchor}" "${hook}")
 
 set(anchor [=[  bool swap_source_scaled = frontbuffer_width_unscaled && frontbuffer_height_unscaled &&]=])
@@ -233,8 +285,97 @@ foreach(name command_processor render_target_cache)
   string(REPLACE "#include \"../shaders/" "#include \"shaders/" ${name} "${${name}}")
   set(first_include "#include \"gpu/xenos/vulkan/${name}.h\"")
   replace_hook(${name} "${first_include}" "${first_include}\n#include \"live_scene.h\"")
+  if(name STREQUAL "command_processor")
+    set(anchor "#include \"live_scene.h\"")
+    replace_hook(${name} "${anchor}" "${anchor}\n#include \"frame_trace.h\"\nnamespace frame_trace = ::wrathfall::vulkan_trace;")
+  endif()
   set(generated "${CMAKE_CURRENT_BINARY_DIR}/${name}.cpp")
   file(CONFIGURE OUTPUT "${generated}" CONTENT "${${name}}" @ONLY)
   list(REMOVE_ITEM vulkan_sources "${xenos}/vulkan/${name}.cpp")
   list(APPEND vulkan_sources "${generated}")
 endforeach()
+
+set(anchor [=[  return refresher_succeeded;
+}]=])
+set(hook [=[  if (refresher_succeeded) {
+    frame_trace::Point("guest-ready", frame_trace::guest_swap_frame,
+                       image_instance.last_refresher_submission);
+  }
+  return refresher_succeeded;
+}]=])
+replace_hook(vulkan_presenter "${anchor}" "${hook}")
+
+set(anchor [=[  u64 current_paint_submission_index = paint_context_.submission_tracker.GetCurrentSubmission();]=])
+set(hook [=[  u64 current_paint_submission_index = paint_context_.submission_tracker.GetCurrentSubmission();
+  frame_trace::Span trace_paint("paint", current_paint_submission_index);]=])
+replace_hook(vulkan_presenter "${anchor}" "${hook}")
+
+set(anchor [=[    paint_context_.submission_tracker.AwaitSubmissionCompletion(current_paint_submission_index -
+                                                                paint_submission_count);]=])
+set(hook [=[    const auto awaited = current_paint_submission_index - paint_submission_count;
+    frame_trace::Span trace_wait("paint-fence-wait", current_paint_submission_index, awaited);
+    paint_context_.submission_tracker.AwaitSubmissionCompletion(awaited);]=])
+replace_hook(vulkan_presenter "${anchor}" "${hook}")
+
+set(anchor [=[  VkResult acquire_result =
+      dfn.vkAcquireNextImageKHR(device, paint_context_.swapchain, UINT64_MAX, acquire_semaphore,
+                                VK_NULL_HANDLE, &swapchain_image_index);]=])
+set(hook [=[  frame_trace::Span trace_acquire("paint-acquire", current_paint_submission_index);
+  VkResult acquire_result =
+      dfn.vkAcquireNextImageKHR(device, paint_context_.swapchain, UINT64_MAX, acquire_semaphore,
+                                VK_NULL_HANDLE, &swapchain_image_index);
+  trace_acquire.Finish(acquire_result);]=])
+replace_hook(vulkan_presenter "${anchor}" "${hook}")
+
+set(anchor [=[  std::shared_ptr<GuestOutputImage> guest_output_image;
+  {
+    u32 guest_output_mailbox_index;]=])
+set(hook [=[  std::shared_ptr<GuestOutputImage> guest_output_image;
+  u64 trace_source = frame_trace::kNoId;
+  {
+    u32 guest_output_mailbox_index;]=])
+replace_hook(vulkan_presenter "${anchor}" "${hook}")
+set(anchor [=[      guest_output_image = guest_output_images_[guest_output_mailbox_index].image;
+    }
+    // Holding the reference makes leaving the consumer critical section safe.
+  }]=])
+set(hook [=[      const auto& instance = guest_output_images_[guest_output_mailbox_index];
+      guest_output_image = instance.image;
+      trace_source = instance.last_refresher_submission;
+    }
+    // Holding the reference makes leaving the consumer critical section safe.
+  }
+  frame_trace::Point("paint-source", current_paint_submission_index, trace_source);]=])
+replace_hook(vulkan_presenter "${anchor}" "${hook}")
+
+set(anchor [=[    VkResult submit_result;
+    {
+      const VulkanDevice::Queue::Acquisition queue_acquisition =]=])
+set(hook [=[    VkResult submit_result;
+    frame_trace::Span trace_submit("paint-submit", current_paint_submission_index);
+    {
+      const VulkanDevice::Queue::Acquisition queue_acquisition =]=])
+replace_hook(vulkan_presenter "${anchor}" "${hook}")
+set(anchor [=[    if (submit_result != VK_SUCCESS) {
+      REXUI_ERROR("VulkanPresenter: Failed to submit command buffers");]=])
+set(hook [=[    trace_submit.Finish(submit_result);
+    if (submit_result != VK_SUCCESS) {
+      REXUI_ERROR("VulkanPresenter: Failed to submit command buffers");]=])
+replace_hook(vulkan_presenter "${anchor}" "${hook}")
+
+set(anchor [=[  VkResult present_result;
+  {]=])
+set(hook [=[  VkResult present_result;
+  frame_trace::Span trace_present("paint-present", current_paint_submission_index);
+  {]=])
+replace_hook(vulkan_presenter "${anchor}" "${hook}")
+replace_hook(vulkan_presenter "  switch (present_result) {"
+  "  trace_present.Finish(present_result);\n  switch (present_result) {")
+
+string(REPLACE "#include \"../shaders/" "#include \"host/shaders/" vulkan_presenter "${vulkan_presenter}")
+set(anchor "#include \"gpu/xenos/host/vulkan/vulkan_presenter.h\"")
+replace_hook(vulkan_presenter "${anchor}" "${anchor}\n#include \"frame_trace.h\"\nnamespace frame_trace = ::wrathfall::vulkan_trace;")
+set(generated "${CMAKE_CURRENT_BINARY_DIR}/vulkan_presenter.cpp")
+file(CONFIGURE OUTPUT "${generated}" CONTENT "${vulkan_presenter}" @ONLY)
+list(REMOVE_ITEM vulkan_sources "${xenos}/host/vulkan/vulkan_presenter.cpp")
+list(APPEND vulkan_sources "${generated}")

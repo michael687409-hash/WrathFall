@@ -10,7 +10,7 @@ namespace AsurasWrath.Launcher
 {
     internal static class GameLaunchInputs
     {
-        // Keep these title and TU1 checks in sync with ProjectInputs.ps1 used by the importer.
+        // Play, build, and imports verify the same supported disc and title update.
         private const string DiscHash = "C7E324A807A4407239B8FBFABE4377C0623889DAA772EADAC42C8B8F86782479";
         private const string PatchHash = "918CDEE90389F27DEE0BFE1BDFD758BC52CC4148666DCAE1E35A1C0297F2005C";
 
@@ -131,14 +131,11 @@ namespace AsurasWrath.Launcher
             string source = Path.Combine(game, @"BCGame\CookedXbox360");
             var configs = Directory.Exists(source) ? Directory.GetFiles(source, "Coalesced_*.bin") : new string[0];
             if (!configs.Any()) throw new FileNotFoundException("The game is missing its compiled graphics configuration.");
-            string target = Path.Combine(cache, temporal ? "blur-off-temporal" : "motion-blur-off");
-            Directory.CreateDirectory(target);
-            foreach (string config in configs)
-            {
-                byte[] sourceBytes = File.ReadAllBytes(config);
-                byte[] patched = PatchGraphicsConfig(sourceBytes, config, temporal, disableSmoothing);
-                AtomicWrite(Path.Combine(target, Path.GetFileName(config)), pending => File.WriteAllBytes(pending, patched));
-            }
+            string mode = temporal ? "blur-off-temporal" : "motion-blur-off";
+            if (disableSmoothing) mode += "-unsmoothed";
+            string target = Path.Combine(cache, mode);
+            LaunchCache.Materialize(target, configs, "graphics-v1/" + mode, (config, pending) =>
+                File.WriteAllBytes(pending, PatchGraphicsConfig(File.ReadAllBytes(config), config, temporal, disableSmoothing)));
             return target;
         }
 

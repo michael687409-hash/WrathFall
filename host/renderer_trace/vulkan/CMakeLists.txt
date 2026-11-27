@@ -69,7 +69,7 @@ set(fidelityfx "${project_tools}/renderer-deps/fsr-2.4.0/FidelityFX-SDK-2.4.0/Ki
 set(streamline "${project_tools}/renderer-deps/streamline-2.14.16")
 set(vulkan_upscalers dlss_vulkan.cpp fsr_vulkan.cpp)
 set(vendor_include "${fidelityfx}/api/include" "${fidelityfx}/upscalers/include" "${streamline}/include")
-add_library(asura_vulkan SHARED ${vulkan_sources} live_scene.cpp live_temporal.cpp
+add_library(asura_vulkan SHARED ${vulkan_sources} frame_trace.cpp live_scene.cpp live_temporal.cpp
   ${vulkan_upscalers})
 add_executable(asura_vulkan_probe EXCLUDE_FROM_ALL temporal_probe.cpp ${vulkan_upscalers})
 set_target_properties(asura_vulkan_probe PROPERTIES OUTPUT_NAME temporal_probe)

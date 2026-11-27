@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Specialized;
 using System.Collections.Generic;
+using System.ComponentModel;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
@@ -22,6 +23,7 @@ namespace AsurasWrath.Launcher
     {
         internal const string WorkerCommand = "--play-worker";
         internal const string ShaderWorkerCommand = "--prepare-shaders-worker";
+        internal const string CollectCommand = "--collect";
         private static readonly string[] UpscalerVariables =
         {
             "ASURA_LIVE_UPSCALER", "ASURA_UPSCALER_REPORT_DIR", "ASURA_LIVE_DLSS_QA",
@@ -114,14 +116,18 @@ namespace AsurasWrath.Launcher
 
         internal static int Run(Project project, string[] args)
         {
-            if (args.Length != 2) throw new ArgumentException("The game launch settings are missing.");
+            if (args.Length != 2 && args.Length != 3) throw new ArgumentException("The game launch settings are missing.");
+            long click = Stopwatch.GetTimestamp();
+            long requested;
+            if (args.Length == 3 && long.TryParse(args[2], NumberStyles.None, CultureInfo.InvariantCulture, out requested) &&
+                requested > 0 && requested <= click) click = requested;
             var settings = new JavaScriptSerializer().Deserialize<GraphicsSettings>(args[1]);
             if (settings == null) throw new InvalidDataException("The game launch settings are invalid.");
             using (GameLaunchInputs.Lock(project.Output))
-                return RunLocked(project, settings);
+                return RunLocked(project, settings, click);
         }
 
-        private static int RunLocked(Project project, GraphicsSettings settings)
+        private static int RunLocked(Project project, GraphicsSettings settings, long click)
         {
             const string native = "native";
             string output = settings.OutputResolution;
@@ -134,7 +140,8 @@ namespace AsurasWrath.Launcher
             string game = Path.Combine(project.Root, @"local\game");
             VerifyInstallation(project);
 
-            string executable = temporal ? StageRenderer(project, vulkan) : project.GameExecutable;
+            bool traceVulkan = vulkan && settings.GameplayCollectorEnabled && project.HasExperimentalVulkan;
+            string executable = temporal || traceVulkan ? StageRenderer(project, vulkan) : project.GameExecutable;
             string user = GameLaunchInputs.PreparePlayerData(project);
             Console.WriteLine("Using the save folder at " + user);
             string cache = Path.Combine(project.Output, "cache");
@@ -158,10 +165,15 @@ namespace AsurasWrath.Launcher
             environment["ASURAS_WRATH_FRAME_RATE"] = Number(settings.FrameRate);
             if (!string.IsNullOrEmpty(monitor)) environment["ASURAS_WRATH_DISPLAY_MONITOR"] = monitor;
             environment["ASURAS_WRATH_GRAPHICS_OVERRIDE"] = overridePath;
+            if (traceVulkan) environment["WRATHFALL_VK_FRAME_TRACE_DIR"] = project.Logs;
+            else if (vulkan && settings.GameplayCollectorEnabled)
+                Console.WriteLine("Vulkan frame tracing is unavailable without the WrathFall Vulkan renderer.");
             string trace = temporal ? ConfigureUpscaler(environment, project, settings, renderer, provider) : null;
 
             using (var process = StartRuntime(start))
             {
+                double milliseconds = (Stopwatch.GetTimestamp() - click) * 1000.0 / Stopwatch.Frequency;
+                Console.WriteLine("Game process started after " + milliseconds.ToString("F0", CultureInfo.InvariantCulture) + " ms.");
                 if (settings.GameplayCollectorEnabled)
                 {
                     try { WatchCollector(project, process, renderer, provider); }
@@ -220,6 +232,7 @@ namespace AsurasWrath.Launcher
             };
             var environment = start.EnvironmentVariables;
             foreach (string variable in UpscalerVariables) environment.Remove(variable);
+            environment.Remove("WRATHFALL_VK_FRAME_TRACE_DIR");
             environment.Remove("ASURAS_WRATH_PREPARE_SHADERS");
             environment.Remove("ASURAS_WRATH_GRAPHICS_OVERRIDE");
             environment.Remove("ASURAS_WRATH_DISPLAY_MONITOR");
@@ -256,8 +269,7 @@ namespace AsurasWrath.Launcher
             var files = Directory.EnumerateFiles(Path.GetDirectoryName(project.GameExecutable), "*.dll")
                 .Where(file => !string.Equals(Path.GetFileName(file), moduleName, StringComparison.OrdinalIgnoreCase))
                 .Concat(new[] { module, project.GameExecutable });
-            foreach (string file in files)
-                GameLaunchInputs.AtomicWrite(Path.Combine(directory, Path.GetFileName(file)), pending => File.Copy(file, pending));
+            LaunchCache.Materialize(directory, files, "renderer-v1", (file, pending) => File.Copy(file, pending));
             return Path.Combine(directory, Path.GetFileName(project.GameExecutable));
         }
 
@@ -328,6 +340,39 @@ namespace AsurasWrath.Launcher
                 // Keep the game handle alive while the collector saves pending marks after exit.
                 collector.WaitForExit(10000);
             }
+        }
+
+        internal static int Collect(Project project)
+        {
+            string executable = Path.Combine(Path.GetDirectoryName(project.GameExecutable), "asura_gameplay_collector.exe");
+            if (!File.Exists(executable)) throw new FileNotFoundException("Build the PC version to install the collector.");
+            string[] paths = { project.GameExecutable, Path.Combine(project.Output, @"dlss-runtime\game\asuras_wrath.exe"),
+                Path.Combine(project.Output, @"vulkan-upscalers\game\asuras_wrath.exe") };
+            var games = Process.GetProcessesByName("asuras_wrath");
+            try
+            {
+                foreach (var game in games)
+                {
+                    IntPtr window;
+                    try
+                    {
+                        window = game.MainWindowHandle;
+                        if (window == IntPtr.Zero || !paths.Contains(game.MainModule.FileName, StringComparer.OrdinalIgnoreCase)) continue;
+                    }
+                    catch (Win32Exception) { continue; }
+                    catch (InvalidOperationException) { continue; }
+                    var arguments = new[] { project.Root, Number(game.Id), window.ToInt64().ToString(CultureInfo.InvariantCulture) };
+                    using (var collector = Process.Start(new ProcessStartInfo(executable, string.Join(" ", arguments.Select(BackgroundJob.Quote)))
+                        { UseShellExecute = false, WorkingDirectory = project.Root }))
+                    {
+                        if (collector == null) throw new InvalidOperationException("The gameplay collector could not be started.");
+                        collector.WaitForExit();
+                        return collector.ExitCode;
+                    }
+                }
+                throw new InvalidOperationException("Start the game from this launcher before opening the collector.");
+            }
+            finally { foreach (var game in games) game.Dispose(); }
         }
 
         private static void VerifyUpscalerTrace(string directory, bool vulkan, string provider)

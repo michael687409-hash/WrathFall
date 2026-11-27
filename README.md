@@ -44,11 +44,12 @@ The target is Xbox 360 title ID `43430817` and media ID `11DFADD6`. TU1 updates 
 
 The build uses the pinned ReXGlue SDK 0.11.0 and portable Clang 20.1.8 in `.tools/`. The custom Xbox prompt builds against the matching SDK sources in `.tools/rexglue-sdk-0.11.0/`. Generated code, imported game files, user data, and build output are git-ignored.
 
-From the source directory, you can build or regenerate the C++ from the command line.
+From the source directory, use Command Prompt to compile the launcher, build the PC version, or regenerate the C++.
 
-```powershell
-.\Build.ps1 -Stage Build
-.\Build.ps1 -Stage Codegen
+```batch
+host\launcher\Build-Launcher.cmd
+start "" /wait WrathFall.exe --build
+start "" /wait WrathFall.exe --codegen
 ```
 
 - See the verified memory checks and the remaining gameplay comparisons. [Xbox 360 accuracy](ACCURACY.md)
