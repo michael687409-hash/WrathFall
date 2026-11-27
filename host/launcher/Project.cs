@@ -29,32 +29,17 @@ namespace AsurasWrath.Launcher
 
         internal string ActiveUpscaler(bool temporal)
         {
+            return ActiveUpscaler(temporal, OutputResolution);
+        }
+
+        internal string ActiveUpscaler(bool temporal, string output)
+        {
             return (Renderer == "d3d12" || Renderer == "vulkan-temporal") &&
-                temporal && OutputResolution == "2560x1440" &&
+                temporal && output == "2560x1440" &&
                 !string.IsNullOrEmpty(Upscaler)
                 ? Upscaler : "native";
         }
 
-        internal IEnumerable<string> Arguments(string stage, bool temporal)
-        {
-            string upscaler = ActiveUpscaler(temporal);
-            var arguments = new List<string> { "-Stage", stage, "-Renderer", RuntimeRenderer };
-            if (upscaler != "native") arguments.AddRange(new[] { "-Upscaler", upscaler });
-            if (stage != "Run") return arguments;
-            string output = OutputResolution;
-            arguments.AddRange(new[] { "-DisplayMode", DisplayMode, "-OutputResolution", output,
-                "-AntiAliasing", output == "1280x720" ? "fxaa_extreme" : AntiAliasing,
-                "-TextureFiltering", TextureFiltering.ToString(CultureInfo.InvariantCulture),
-                "-FrameRate", FrameRate.ToString(CultureInfo.InvariantCulture) });
-            string display = DisplayModes.Resolve(DisplayMonitor).DeviceName;
-            if (!string.IsNullOrEmpty(display)) arguments.AddRange(new[] { "-DisplayMonitor", display });
-            if (FrameRate == 0)
-                arguments.AddRange(new[] { "-DisplayRefreshRate", DisplayModes.DesktopRate(DisplayMonitor).ToString(CultureInfo.InvariantCulture) });
-            if (upscaler == "dlss") arguments.AddRange(new[] { "-DlssPreset", DlssPreset });
-            if (!VSync) arguments.Add("-DisableVSync");
-            if (!GameplayCollectorEnabled) arguments.Add("-SkipGameplayCollector");
-            return arguments;
-        }
     }
 
     internal sealed class Project
@@ -78,7 +63,8 @@ namespace AsurasWrath.Launcher
 
         internal bool HasDisc { get { return File.Exists(Path.Combine(Root, @"local\game\default.xex")); } }
         internal bool HasUpdate { get { return File.Exists(Path.Combine(Root, @"local\update\default.xexp")); } }
-        internal bool IsBuilt { get { return File.Exists(Path.Combine(Output, @"build\win-amd64\Release\asuras_wrath.exe")); } }
+        internal string GameExecutable { get { return Path.Combine(Output, @"build\win-amd64\Release\asuras_wrath.exe"); } }
+        internal bool IsBuilt { get { return File.Exists(GameExecutable); } }
         internal bool HasExperimentalVulkan
         {
             get { return File.Exists(Path.Combine(Output, @"vulkan-upscalers\rexgpu-xenos-vulkan.dll")); }
@@ -97,10 +83,14 @@ namespace AsurasWrath.Launcher
             return RecordedShaderFiles(renderer, temporal).Any();
         }
 
+        internal string ShaderCacheRoot(string renderer)
+        {
+            return Path.Combine(Output, renderer == "vulkan" ? @"cache\vulkan" : "cache");
+        }
+
         private IEnumerable<FileInfo> RecordedShaderFiles(string renderer, bool temporal)
         {
-            string path = Path.Combine(Output, renderer == "vulkan"
-                ? @"cache\vulkan\shaders\shareable" : @"cache\shaders\shareable");
+            string path = Path.Combine(ShaderCacheRoot(renderer), @"shaders\shareable");
             string suffix = renderer == "vulkan" ? "vk" : "d3d12";
             string pattern = temporal && renderer == "d3d12"
                 ? "43430817.rtv.d3d12.xpso" : "43430817.*." + suffix + ".xpso";
@@ -113,8 +103,7 @@ namespace AsurasWrath.Launcher
         {
             string renderer = settings.RuntimeRenderer;
             bool upscaled = settings.ActiveUpscaler(temporal) != "native";
-            string variant = renderer == "vulkan" ? "vulkan-fsi" : upscaled ? "d3d12-rtv" : "d3d12";
-            string path = Path.Combine(Output, "shader-preparation", variant + ".prepared");
+            string path = ShaderPreparationPath(renderer, upscaled);
             if (!File.Exists(path)) return ShaderPreparation.Missing;
             return MatchesShaderPreparation(path, renderer, upscaled)
                 ? ShaderPreparation.Current : ShaderPreparation.Stale;
@@ -127,35 +116,9 @@ namespace AsurasWrath.Launcher
                 var stamp = Json.Deserialize<ShaderPreparationStamp>(File.ReadAllText(path));
                 if (stamp == null || stamp.Version != 1 || stamp.Files == null || stamp.Drivers == null)
                     return false;
-                var drivers = DisplayDriverVersions().ToArray();
-                if (drivers.Length == 0 || !drivers.SequenceEqual(stamp.Drivers, StringComparer.OrdinalIgnoreCase))
-                    return false;
-
-                var build = Path.Combine(Output, @"build\win-amd64\Release");
-                string module = "rexgpu-xenos-" + renderer + ".dll";
-                var archives = new List<FileInfo>(RecordedShaderFiles(renderer, upscaled));
-                if (archives.Count == 0) return false;
-                var shaderCode = new FileInfo(Path.Combine(archives[0].DirectoryName, "43430817.xsh"));
-                if (shaderCode.Exists) archives.Add(shaderCode);
-                var files = new List<FileInfo> { new FileInfo(Path.Combine(build, "asuras_wrath.exe")),
-                    new FileInfo(Path.Combine(build, module)) };
-                if (renderer == "vulkan")
-                {
-                    var alternate = new FileInfo(Path.Combine(Output, "vulkan-upscalers", module));
-                    if (alternate.Exists) files.Add(alternate);
-                }
-                else if (upscaled)
-                {
-                    var alternate = new FileInfo(Path.Combine(Root, "runtime", "upscalers", module));
-                    if (!alternate.Exists) alternate = new FileInfo(Path.Combine(Output, "dlss-runtime", module));
-                    files.Add(alternate);
-                }
-                int relativeStart = Root.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar).Length + 1;
-                return files.All(file => file.Exists) && files.Select(file => string.Format(CultureInfo.InvariantCulture,
-                    "{0}\t{1}\t{2}", file.FullName.Substring(relativeStart), file.Length, file.LastWriteTimeUtc.Ticks))
-                    .Concat(archives.Select(file => file.FullName.Substring(relativeStart) + "\t" + ShaderDigest(file)))
-                    .OrderBy(entry => entry, StringComparer.OrdinalIgnoreCase)
-                    .SequenceEqual(stamp.Files, StringComparer.OrdinalIgnoreCase);
+                var current = CaptureShaderPreparation(renderer, upscaled, true);
+                return current != null && current.Drivers.SequenceEqual(stamp.Drivers, StringComparer.OrdinalIgnoreCase) &&
+                    current.Files.SequenceEqual(stamp.Files, StringComparer.OrdinalIgnoreCase);
             }
             catch (Exception error)
             {
@@ -166,11 +129,55 @@ namespace AsurasWrath.Launcher
             }
         }
 
-        private string ShaderDigest(FileInfo file)
+        internal string ShaderPreparationSnapshot(string renderer, bool upscaled)
+        {
+            var stamp = CaptureShaderPreparation(renderer, upscaled, false);
+            return stamp == null ? null : Json.Serialize(stamp);
+        }
+
+        internal void SaveShaderPreparation(string renderer, bool upscaled, string snapshot)
+        {
+            string path = ShaderPreparationPath(renderer, upscaled);
+            Directory.CreateDirectory(Path.GetDirectoryName(path));
+            GameLaunchInputs.AtomicWrite(path, pending => File.WriteAllText(pending, snapshot));
+        }
+
+        private string ShaderPreparationPath(string renderer, bool upscaled)
+        {
+            string variant = renderer == "vulkan" ? "vulkan-fsi" : upscaled ? "d3d12-rtv" : "d3d12";
+            return Path.Combine(Output, "shader-preparation", variant + ".prepared");
+        }
+
+        private ShaderPreparationStamp CaptureShaderPreparation(string renderer, bool upscaled, bool reuseDigests)
+        {
+            var drivers = DisplayDriverVersions().ToArray();
+            var archives = new List<FileInfo>(RecordedShaderFiles(renderer, upscaled));
+            if (drivers.Length == 0 || archives.Count == 0) return null;
+            var shaderCode = new FileInfo(Path.Combine(archives[0].DirectoryName, "43430817.xsh"));
+            if (shaderCode.Exists) archives.Add(shaderCode);
+            string module = "rexgpu-xenos-" + renderer + ".dll";
+            var files = new List<FileInfo> { new FileInfo(GameExecutable),
+                new FileInfo(Path.Combine(Path.GetDirectoryName(GameExecutable), module)) };
+            bool vulkan = renderer == "vulkan";
+            var alternate = new FileInfo(TemporalModule(vulkan));
+            if ((vulkan && alternate.Exists) || (!vulkan && upscaled)) files.Add(alternate);
+            if (files.Any(file => !file.Exists)) return null;
+            int relativeStart = Root.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar).Length + 1;
+            return new ShaderPreparationStamp
+            {
+                Version = 1, Drivers = drivers,
+                Files = files.Select(file => string.Format(CultureInfo.InvariantCulture,
+                    "{0}\t{1}\t{2}", file.FullName.Substring(relativeStart), file.Length, file.LastWriteTimeUtc.Ticks))
+                    .Concat(archives.Select(file => file.FullName.Substring(relativeStart) + "\t" + ShaderDigest(file, reuseDigests)))
+                    .OrderBy(entry => entry, StringComparer.OrdinalIgnoreCase).ToArray()
+            };
+        }
+
+        private string ShaderDigest(FileInfo file, bool reuseDigests)
         {
             Tuple<long, long, string> prior;
             long size = file.Length, ticks = file.LastWriteTimeUtc.Ticks;
-            if (shaderDigests.TryGetValue(file.FullName, out prior) && prior.Item1 == size && prior.Item2 == ticks)
+            if (reuseDigests && shaderDigests.TryGetValue(file.FullName, out prior) && prior.Item1 == size && prior.Item2 == ticks)
                 return prior.Item3;
             using (var sha = System.Security.Cryptography.SHA256.Create())
             using (var input = File.Open(file.FullName, FileMode.Open, FileAccess.Read,
@@ -211,20 +218,32 @@ namespace AsurasWrath.Launcher
         internal string[] AvailableUpscalers(string renderer = "d3d12")
         {
             bool vulkan = renderer == "vulkan-temporal";
-            bool runtime = vulkan ? HasExperimentalVulkan :
-                File.Exists(Path.Combine(Root, @"runtime\upscalers\rexgpu-xenos-d3d12.dll")) ||
-                File.Exists(Path.Combine(Output, @"dlss-runtime\rexgpu-xenos-d3d12.dll"));
-            if (!runtime) return new string[0];
-            string vendors = Path.Combine(Root, @".tools\renderer-deps");
-            string nvidia = Path.Combine(vendors, @"streamline-2.14.16\bin\x64");
-            string amd = Path.Combine(vendors, @"fsr-2.4.0\FidelityFX-SDK-2.4.0\Kits\FidelityFX\signedbin");
-            var result = new List<string>();
-            if (new[] { "sl.interposer.dll", "sl.common.dll", "sl.pcl.dll", "sl.dlss.dll", "nvngx_dlss.dll" }
-                .All(file => File.Exists(Path.Combine(nvidia, file)))) result.Add("dlss");
+            if (!File.Exists(TemporalModule(vulkan))) return new string[0];
+            return new[] { "dlss", "fsr3" }.Where(provider => HasVendorRuntime(provider, vulkan)).ToArray();
+        }
+
+        internal string TemporalModule(bool vulkan)
+        {
+            if (vulkan) return Path.Combine(Output, @"vulkan-upscalers\rexgpu-xenos-vulkan.dll");
+            string installed = Path.Combine(Root, @"runtime\upscalers\rexgpu-xenos-d3d12.dll");
+            return File.Exists(installed) ? installed : Path.Combine(Output, @"dlss-runtime\rexgpu-xenos-d3d12.dll");
+        }
+
+        internal string VendorRuntime(string provider)
+        {
+            return Path.Combine(Root, @".tools\renderer-deps", provider == "dlss" ? @"streamline-2.14.16\bin\x64"
+                : @"fsr-2.4.0\FidelityFX-SDK-2.4.0\Kits\FidelityFX\signedbin");
+        }
+
+        private bool HasVendorRuntime(string provider, bool vulkan)
+        {
+            string runtime = VendorRuntime(provider);
+            if (provider == "dlss")
+                return new[] { "sl.interposer.dll", "sl.common.dll", "sl.pcl.dll", "sl.dlss.dll", "nvngx_dlss.dll" }
+                    .All(file => File.Exists(Path.Combine(runtime, file)));
             string suffix = vulkan ? "_vk.dll" : "_dx12.dll";
-            if (new[] { "amd_fidelityfx_loader", "amd_fidelityfx_upscaler" }
-                .All(file => File.Exists(Path.Combine(amd, file + suffix)))) result.Add("fsr3");
-            return result.ToArray();
+            return File.Exists(Path.Combine(runtime, "amd_fidelityfx_loader" + suffix)) &&
+                File.Exists(Path.Combine(runtime, "amd_fidelityfx_upscaler" + suffix));
         }
 
         private T Value<T>(string key, T fallback)

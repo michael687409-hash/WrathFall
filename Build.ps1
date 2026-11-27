@@ -69,56 +69,25 @@ $game = Join-Path $PSScriptRoot 'local\game'
 $update = Join-Path $PSScriptRoot 'local\update'
 $out = Join-Path $PSScriptRoot 'out'
 $manifest = Join-Path $PSScriptRoot 'asuras_wrath_manifest.toml'
-. (Join-Path $PSScriptRoot 'ProjectInputs.ps1')
-
-function Get-ShaderPreparationStamp([string] $Root, [string] $Renderer, [bool] $Temporal,
-                                    [string] $CacheRoot, [string] $CachePattern) {
-    $key = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey(
-        'SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}')
-    if (!$key) { return }
-    try {
-        $drivers = @(foreach ($name in ($key.GetSubKeyNames() | Where-Object { $_ -match '^\d{4}$' } | Sort-Object)) {
-            $adapter = $key.OpenSubKey($name)
-            if (!$adapter) { continue }
-            try {
-                $version = $adapter.GetValue('DriverVersion')
-                if (![string]::IsNullOrWhiteSpace($version)) {
-                    "$name`t$version`t$($adapter.GetValue('InfPath', ''))`t$($adapter.GetValue('MatchingDeviceId', ''))"
-                }
-            } finally { $adapter.Dispose() }
-        })
-    } finally { $key.Dispose() }
-    if (!$drivers.Count) { return }
-
-    $shareable = Join-Path $CacheRoot 'shaders\shareable'
-    $archives = @(Get-ChildItem -LiteralPath $shareable -File -Filter $CachePattern |
-        Where-Object Length -GT 32)
-    if (!$archives.Count) { return }
-    $shaderCode = Join-Path $shareable '43430817.xsh'
-    if (Test-Path -LiteralPath $shaderCode -PathType Leaf) { $archives += Get-Item -LiteralPath $shaderCode }
-    $build = Join-Path $Root 'out\build\win-amd64\Release'
-    $module = "rexgpu-xenos-$Renderer.dll"
-    $paths = @((Join-Path $build 'asuras_wrath.exe'), (Join-Path $build $module))
-    if ($Renderer -eq 'vulkan') {
-        $alternate = Join-Path $Root "out\vulkan-upscalers\$module"
-        if (Test-Path -LiteralPath $alternate -PathType Leaf) { $paths += $alternate }
-    } elseif ($Temporal) {
-        $alternate = Join-Path $Root "runtime\upscalers\$module"
-        if (!(Test-Path -LiteralPath $alternate -PathType Leaf)) {
-            $alternate = Join-Path $Root "out\dlss-runtime\$module"
-        }
-        $paths += $alternate
+# The C# launcher owns shader preparation. Keep this CLI entry for existing commands.
+if ($Stage -eq 'PrepareShaders') {
+    $launcher = Join-Path $PSScriptRoot 'WrathFall.exe'
+    if (!(Test-Path -LiteralPath $launcher -PathType Leaf) -and (Split-Path -Leaf $PSScriptRoot) -eq 'engine') {
+        $launcher = Join-Path (Split-Path -Parent $PSScriptRoot) 'WrathFall.exe'
     }
-    $relativeStart = $Root.TrimEnd('\', '/').Length + 1
-    [string[]] $lines = @(foreach ($file in (Get-Item -LiteralPath $paths)) {
-        "$($file.FullName.Substring($relativeStart))`t$($file.Length)`t$($file.LastWriteTimeUtc.Ticks)"
-    })
-    $lines += @(foreach ($file in $archives) {
-        "$($file.FullName.Substring($relativeStart))`t$((Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash)"
-    })
-    [Array]::Sort($lines, [StringComparer]::OrdinalIgnoreCase)
-    [ordered]@{ Version = 1; Drivers = $drivers; Files = $lines } | ConvertTo-Json -Compress
+    if (!(Test-Path -LiteralPath $launcher -PathType Leaf)) { throw 'Build the WrathFall launcher first.' }
+    $request = @{
+        Renderer = $Renderer; Upscaler = $Upscaler; ResolutionScale = $ResolutionScale
+        DisplayMode = $DisplayMode; VSync = !$DisableVSync.IsPresent
+        TextureFiltering = $TextureFiltering; AntiAliasing = $AntiAliasing
+    } | ConvertTo-Json -Compress
+    $payload = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($request))
+    $process = Start-Process -FilePath $launcher -ArgumentList '--prepare-shaders-worker', $payload -NoNewWindow -Wait -PassThru
+    if ($process.ExitCode -ne 0) { throw "Shader preparation exited with code $($process.ExitCode)." }
+    return
 }
+
+. (Join-Path $PSScriptRoot 'ProjectInputs.ps1')
 
 function Invoke-Program([string] $Program, [string[]] $Arguments) {
     & $Program @Arguments
@@ -188,15 +157,14 @@ try {
         return
     }
 
-    if ($Stage -in 'Run', 'PrepareShaders') {
-        $prepare = $Stage -eq 'PrepareShaders'
-        $vulkanTemporal = !$prepare -and $Renderer -eq 'vulkan' -and $Upscaler -ne 'native'
+    if ($Stage -eq 'Run') {
+        $vulkanTemporal = $Renderer -eq 'vulkan' -and $Upscaler -ne 'native'
         # The Vulkan and D3D12 shader archives use the same filename with incompatible versions.
         $cacheRoot = Join-Path $out 'cache'
         if ($Renderer -eq 'vulkan') { $cacheRoot = Join-Path $cacheRoot 'vulkan' }
         $exe = Join-Path $out 'build\win-amd64\Release\asuras_wrath.exe'
         if (!(Test-Path -LiteralPath $exe -PathType Leaf)) { throw "Build the executable first. Missing $exe." }
-        if ($Upscaler -ne 'native' -and (!$prepare -or $Renderer -eq 'd3d12')) {
+        if ($Upscaler -ne 'native') {
             $upscalerName = if ($Upscaler -eq 'fsr3') { 'FSR 3' } else { 'DLSS' }
             if ($ResolutionScale -ne 1) { throw "$upscalerName requires 720p internal resolution." }
             if ($vulkanTemporal -and $OutputResolution -ne '2560x1440') {
@@ -236,26 +204,8 @@ try {
             $exe = Join-Path $temporalGame 'asuras_wrath.exe'
         }
         $logRoot = Join-Path $out 'logs'
-        if ($prepare) {
-            $cachePattern = if ($Renderer -eq 'vulkan') { '43430817.*.vk.xpso' }
-                elseif ($Upscaler -ne 'native') { '43430817.rtv.d3d12.xpso' } else { '43430817.*.d3d12.xpso' }
-            $recorded = Get-ChildItem -LiteralPath (Join-Path $cacheRoot 'shaders\shareable') -File `
-                -Filter $cachePattern `
-                -ErrorAction SilentlyContinue | Where-Object Length -GT 32
-            if (!$recorded) { throw 'No recorded shaders for this renderer are available to precompile.' }
-            $preparationStamp = $null
-            try {
-                $preparationStamp = Get-ShaderPreparationStamp $PSScriptRoot $Renderer ($Upscaler -ne 'native') $cacheRoot $cachePattern
-            } catch {
-                Write-Warning "Unable to identify the inputs for shader preparation. $($_.Exception.Message)"
-            }
-            $userRoot = Join-Path $out 'shader-preparation\user'
-            $logRoot = Join-Path $out 'logs\shader-preparation'
-            Write-Output 'Precompiling recorded shaders...'
-        } else {
-            $userRoot = Initialize-PlayerData $PSScriptRoot
-            Write-Output "Using the save folder at $userRoot"
-        }
+        $userRoot = Initialize-PlayerData $PSScriptRoot
+        Write-Output "Using the save folder at $userRoot"
         $arguments = @(
             ('"--title.game_root={0}"' -f $game),
             ('"--title.update_root={0}"' -f $update),
@@ -278,19 +228,10 @@ try {
         )
         if ($Renderer -eq 'd3d12' -and $Upscaler -ne 'native') { $arguments += '--gpu.d3d12.render_target_path=rtv' }
         if ($Renderer -eq 'vulkan') { $arguments += '--gpu.vulkan.render_target_path=fsi' }
-        if (!$prepare -and $OutputResolution) {
+        if ($OutputResolution) {
             $arguments += "--ui.resolution=$OutputResolution",
                 '--ui.video_mode_width=1280', '--ui.video_mode_height=720'
             if (!$DisplayMonitor) { $arguments += '--ui.monitor=1' }
-        }
-        if ($prepare) {
-            $arguments += @('--ui.driver=none', '--log.level=info')
-            if ($Renderer -eq 'd3d12') {
-                # Wait for the preload workers before reporting completion.
-                $arguments += '--gpu.d3d12.pipeline_creation_threads=0'
-            } elseif ($Renderer -eq 'vulkan') {
-                $arguments += '--gpu.vulkan.pipeline_creation_threads=0'
-            }
         }
         $previousRate = $env:ASURAS_WRATH_FRAME_RATE
         $previousMonitor = $env:ASURAS_WRATH_DISPLAY_MONITOR
@@ -299,25 +240,21 @@ try {
         $upscalerEnvironment = @{}
         $upscalerLog = $null
         try {
-            $env:ASURAS_WRATH_FRAME_RATE = if ($prepare) { '30' } else { [string] $FrameRate }
-            $env:ASURAS_WRATH_DISPLAY_MONITOR = if (!$prepare -and $DisplayMonitor) { $DisplayMonitor } else { $null }
-            $env:ASURAS_WRATH_PREPARE_SHADERS = if ($prepare) { '1' } else { $null }
-            $env:ASURAS_WRATH_GRAPHICS_OVERRIDE = if (!$prepare) {
-                . (Join-Path $PSScriptRoot 'MotionBlur.ps1')
-                $temporal = $Upscaler -ne 'native'
-                $override = if ($temporal) { 'blur-off-temporal' } else { 'motion-blur-off' }
-                New-MotionBlurOverride $game (Join-Path $out "cache\$override") -KeepVelocityPass:$temporal `
-                    -DisableFrameRateSmoothing:($FrameRate -ne 30)
-            } else { $null }
-            if (!$prepare) {
-                $arguments += "--gpu.frame_limit=$FrameRate"
-            }
-            if (!$prepare -and $FrameRate -eq 0) {
+            $env:ASURAS_WRATH_FRAME_RATE = [string] $FrameRate
+            $env:ASURAS_WRATH_DISPLAY_MONITOR = if ($DisplayMonitor) { $DisplayMonitor } else { $null }
+            $env:ASURAS_WRATH_PREPARE_SHADERS = $null
+            . (Join-Path $PSScriptRoot 'MotionBlur.ps1')
+            $temporal = $Upscaler -ne 'native'
+            $override = if ($temporal) { 'blur-off-temporal' } else { 'motion-blur-off' }
+            $env:ASURAS_WRATH_GRAPHICS_OVERRIDE = New-MotionBlurOverride $game (Join-Path $out "cache\$override") -KeepVelocityPass:$temporal `
+                -DisableFrameRateSmoothing:($FrameRate -ne 30)
+            $arguments += "--gpu.frame_limit=$FrameRate"
+            if ($FrameRate -eq 0) {
                 $arguments += "--ui.video_mode_refresh_rate=$DisplayRefreshRate"
-            } elseif (!$prepare -and $FrameRate -gt 60) {
+            } elseif ($FrameRate -gt 60) {
                 $arguments += "--ui.video_mode_refresh_rate=$FrameRate"
             }
-            if (!$prepare -and $Upscaler -ne 'native') {
+            if ($Upscaler -ne 'native') {
                 $upscalerLog = Join-Path $logRoot ($Renderer + '-' + $Upscaler + '-' + (Get-Date -Format 'yyyyMMdd-HHmmss-fff'))
                 $null = New-Item -ItemType Directory -Path $upscalerLog
                 $model = if ($Upscaler -eq 'dlss') {
@@ -349,7 +286,6 @@ try {
                 Write-Output "$upscalerName on $Renderer, 1280x720 to 2560x1440$modelText. Log folder $upscalerLog"
             }
             $start = @{ FilePath=$exe; ArgumentList=$arguments; PassThru=$true }
-            if ($prepare) { $start.WindowStyle = 'Hidden' }
             $process = Start-Process @start
         } finally {
             $env:ASURAS_WRATH_FRAME_RATE = $previousRate
@@ -360,9 +296,9 @@ try {
                 [Environment]::SetEnvironmentVariable($name, $upscalerEnvironment[$name])
             }
         }
-        if (!$prepare -and $SkipGameplayCollector) {
+        if ($SkipGameplayCollector) {
             Write-Output 'Gameplay collector disabled.'
-        } elseif (!$prepare) {
+        } else {
             try { Watch-GameplayCollector $process $logRoot $Renderer $Upscaler }
             catch { Write-Output "Gameplay collector unavailable. $($_.Exception.Message)" }
         }
@@ -382,29 +318,6 @@ try {
             if (!(Test-Path -LiteralPath $upscalerTrace)) { throw "The $upscalerName renderer did not start. See $logRoot." }
             $failure = Select-String -LiteralPath $upscalerTrace -Pattern '^disabled\t' | Select-Object -Last 1
             if ($failure) { throw "$upscalerName stopped during play. $($failure.Line.Split("`t", 2)[1])" }
-        }
-        if ($prepare) {
-            $variant = if ($Renderer -eq 'vulkan') { 'vulkan-fsi' }
-                elseif ($Upscaler -eq 'native') { $Renderer } else { 'd3d12-rtv' }
-            $prepared = Join-Path $out "shader-preparation\$variant.prepared"
-            Write-Output 'Recorded shader precompilation finished.'
-            try {
-                $current = Get-ShaderPreparationStamp $PSScriptRoot $Renderer ($Upscaler -ne 'native') $cacheRoot $cachePattern
-                if (!$preparationStamp -or $current -cne $preparationStamp) {
-                    Write-Warning 'The shader preparation inputs could not be verified. Recompile shaders to update their status.'
-                    return
-                }
-                [void][IO.Directory]::CreateDirectory((Split-Path -Parent $prepared))
-                $pending = "$prepared.$PID.tmp"
-                try {
-                    [IO.File]::WriteAllText($pending, $current)
-                    Move-Item -LiteralPath $pending -Destination $prepared -Force
-                } finally {
-                    if (Test-Path -LiteralPath $pending -PathType Leaf) { Remove-Item -LiteralPath $pending }
-                }
-            } catch {
-                Write-Warning "Could not save the shader preparation status. $($_.Exception.Message)"
-            }
         }
         return
     }

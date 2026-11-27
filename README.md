@@ -1,57 +1,56 @@
 # WrathFall
 
-Windows x64 static recompilation of title `43430817`, media ID `11DFADD6`, using ReXGlue 0.11.0. TU1 changes the executable from `0.0.0.5` to `0.0.1.5`. The build and the runtime load the same patched image.
+WrathFall is a native PC recompilation of the Xbox 360 version of **Asura's Wrath** for 64-bit Windows. Bring your own game disc image and matching title update. You can also import DLC from your own copies.
 
-## Build the launcher
+## Install and play
 
-This repository contains source. Install Visual Studio 2022 Build Tools with the Desktop development with C++ workload, x64 tools, a Windows SDK, and the CMake tools. Place the Windows x64 ReXGlue 0.11.0 package at `.tools/rexglue-0.11.0/win-amd64/`, matching SDK sources at `.tools/rexglue-sdk-0.11.0/`, and LLVM 20.1.8 at `.tools/llvm-20.1.8/`. Run `.\host\launcher\Build-Launcher.ps1` to create `WrathFall.exe`.
+For the first build, install Visual Studio Build Tools with the **Desktop development with C++** workload, a Windows SDK, and CMake and Ninja. The launcher uses these to build the PC executable from your game files. [Visual Studio Build Tools download](https://visualstudio.microsoft.com/downloads/)
 
-For optional Direct3D 12 upscaling, see [renderer build instructions](host/renderer_trace/README.md). [Experimental Vulkan upscaling](host/renderer_trace/vulkan/README.md) adds DLSS and FSR 3 at 2560 × 1440 with a fixed 720p input. This mode requires a locally built Vulkan driver and is awaiting gameplay validation.
+1. Extract the full WrathFall download into a folder. Keep the bundled folders beside `WrathFall.exe`, then open the launcher.
+2. Open **Game files**. Select **Choose disc…** and pick your Xbox 360 `.iso` or a `.7z` containing a single ISO.
+3. Select **Choose TU1…** and pick the matching Title Update 1 package for media ID `11DFADD6`. You can use a TU1 ZIP, a raw Xbox 360 title update package, or the extracted `default.xexp`.
+4. To install optional DLC, choose **Add DLC…**. You can select multiple ZIPs or raw Xbox 360 content packages. Leave raw package filenames as they came from the console.
+5. Open **Play** and choose **Build**. When the button reads **Installed**, choose **Play**. Build progress and errors appear under **Activity**.
 
-## Open the launcher
+Follow the game's save prompts on first launch. In an Xbox 360 system prompt, use the D-pad to move, **A** to confirm, and **B** to go back.
 
-Open **WrathFall.exe** from the project folder. The launcher opens on the display under your mouse pointer. In **Game files**, select your Xbox 360 `.iso` or single-ISO `.7z`, add the matching TU1, and select any DLC ZIPs or unpacked Xbox content packages. Open the **Play** page and choose **Build** to install. Once the status reads **Installed**, choose **Play**. Progress appears under **Activity** on the Play screen and in `out/logs/`.
+Play, saves, achievements, and imported DLC work offline. The game can open imported episodes and packs, including Episode 11.5, Episode 15.5, Part IV, Lost Episode 1, and Lost Episode 2, when you supply their packages.
 
-On first play, follow the game’s own save prompts. On the Xbox 360 system prompt, use the D-pad to select a choice, A to confirm, or B to go back. The launcher keeps your profile and saves in `userdata/` at the project root. Existing launcher profiles from `out/user/` are copied and verified when setting up this folder. Keep `userdata/` when rebuilding or updating the project.
+## Saves and manual file setup
 
-| Manual input | Place it here |
+Keep `userdata/` when updating or rebuilding WrathFall. If the launcher finds an older profile in `out/user/`, it copies and verifies that profile when creating `userdata/`.
+
+If you already extracted the Xbox files, place them in the folders below. Use paths relative to `engine/` if your download has that folder. Otherwise, use the project folder beside `WrathFall.exe`.
+
+| File | Destination |
 | --- | --- |
-| Extracted game tree with `default.xex` and `BCGame/` | `local/game/` |
-| Matching TU1 `default.xexp` | `local/update/` |
+| Extracted game tree, including `default.xex` and `BCGame/` | `local/game/` |
+| Matching TU1 patch named `default.xexp` | `local/update/` |
 | Raw DLC packages with their original 42-character Xbox filenames | `local/dlc/` |
 
-The build stages a verified TU1 copy beside `default.xex`. On launch, ReXGlue registers the DLC packages attached to this title and mounts each package from its local file when the game opens it.
+WrathFall verifies and stages the TU1 patch beside `default.xex` before building or running the game.
 
-The game runs offline. Xbox 360 socket requests return a network-down error before a Windows socket is opened. Local saves, achievements, and imported DLC are available offline. Windows Firewall access is unnecessary for normal play.
+## Graphics and shaders
 
-## Graphics and shader cache
+- **Display.** In **Graphics**, choose your monitor and use windowed, borderless windowed, or exclusive fullscreen. Borderless follows the selected monitor's desktop resolution. The resolution picker also offers the original 1280 × 720.
+- **Upscaling.** With the optional runtime installed, Direct3D 12 supports DLSS or FSR 3 from the original 720p to 2560 × 1440. Choose **Upscaler**, then select a model preset for DLSS. Use the **NVIDIA DLSS setup** card to import the Windows x64 Streamline 2.14.16 ZIP. **Vulkan (experimental upscaling)** is available when its runtime is installed. **DLSS NR** previews settings for a future Neural Rendering integration.
+- **Shader preparation.** After the renderer has recorded shaders during play, use **Precompile Shaders** on the **Play** page to prepare them. The process runs without entering gameplay. Use **Recompile Shaders** to refresh the cache after a driver update. Play is available while the cache is incomplete. New shaders may compile the first time you visit a scene.
 
-The **Graphics** panel offers windowed, borderless windowed, and exclusive fullscreen. **Output resolution** lists supported resolutions detected on connected displays, plus the original 1280 × 720. With the optional temporal runtime installed, 1440p uses DLSS or FSR 3 to upscale from the original 720p. It also offers 60, 120, and 144 FPS targets as experimental options. Settings are saved when you click **Play** or close the launcher. **Reset graphics** restores the default selections.
+Graphics settings are saved when you choose **Play** or close the launcher. If setup fails, check **Activity** on the **Play** page or open **Logs** from the sidebar.
 
-**Precompile Shaders** prepares the selected renderer's captured pipelines in a separate run without entering gameplay. The button becomes available once the renderer has recorded pipelines under `out/cache/`. Select **Recompile Shaders** to warm the recorded pipelines again after a driver update.
+## Developer notes
 
-Cache coverage grows as the renderer encounters new draws. Full precompilation requires a verified corpus covering the base game, DLC, menus, and graphics variants, plus a persistent native pipeline cache. Play remains available with partial coverage. New pipelines compile synchronously to preserve their draws.
+The target is Xbox 360 title ID `43430817` and media ID `11DFADD6`. TU1 updates the executable from `0.0.0.5` to `0.0.1.5`. The build and runtime use the same patched image. ReXGlue registers the DLC and mounts the local package when the game opens it.
 
-## Record a gameplay issue
+The build uses the pinned ReXGlue SDK 0.11.0 and portable Clang 20.1.8 in `.tools/`. The custom Xbox prompt builds against the matching SDK sources in `.tools/rexglue-sdk-0.11.0/`. Generated code, imported game files, user data, and build output are git-ignored.
 
-The **Gameplay collector** checkbox next to **Play** controls whether capture starts with the game. It starts checked and remembers your choice. When it’s on, the launcher shows **Collector active (L to mark)** once capture is ready. Press **L** in the game to record an issue. The collector saves nearby game-window frames and recent game logs locally under `out/diagnostics/`. Collector activity is logged under `out/logs/gameplay-collector-*.log`. The collector closes after the game exits, including when the game crashes.
-
-The collector flags **possible blur** and **possible ghosting** using sampled image analysis. Reports save lossless PNGs at the captured game window’s resolution. Each session has `session.txt` for the selected renderer and upscaler and `frame-quality.csv` for measurements. Match the scene, output resolution, and display mode when comparing providers. Press **L** to mark matching moments.
-
-The collector also saves **possible-frame-stutter** and **possible-fps-drop** reports automatically. It compares the game window’s compositor frame timestamps with its recent cadence while the game is in focus. Open `frame-times.csv` for the intervals before and after the mark. The timing is for the frames Windows captures from the game window. Loading transitions and changes in a cutscene’s intended frame rate can also produce reports.
-
-When DLSS or FSR 3 unexpectedly falls back during a 3D scene, the collector groups the affected renderer frames in an **upscaler-fallback** report. Open `event.txt` for the first and last game frame, reason, and screenshot timestamp. Open `upscaler-details.tsv` for the associated draw and motion shader IDs. Runtime startup failures may have no shader IDs. The nearest available game-window image is saved as `screenshot.png`. The process-specific raw event log is under `out/logs/upscaler-*.tsv`. Routine menu and loading-card presentation changes are excluded. Use **L** for visible issues such as ghosting or trails.
-
-## Build from PowerShell
+From the source directory, you can build or regenerate the C++ from the command line.
 
 ```powershell
 .\Build.ps1 -Stage Build
-.\Build.ps1 -Stage PrepareShaders -Renderer d3d12
-.\Build.ps1 -Stage Run -FrameRate 60 -DisplayMode borderless
+.\Build.ps1 -Stage Codegen
 ```
 
-The project uses the pinned SDK and portable Clang 20.1.8 in `.tools/`, along with the installed x64 Visual Studio Build Tools, the Windows SDK, CMake, and Ninja. The custom prompt builds against the matching SDK sources under `.tools/rexglue-sdk-0.11.0/`. Run `Build.ps1 -Stage Codegen` to regenerate the C++ explicitly. Generated sources, game inputs, user data, and build outputs are git-ignored.
-
-See [Xbox 360 accuracy](ACCURACY.md) for the memory check and the remaining game-behavior comparisons.
-
-[ReXGlue 0.11.0](https://github.com/rexglue/rexglue-sdk/releases/tag/v0.11.0) · [ReXGlue shader and storage documentation](https://docs.rexglue.com/filesystem/folders-and-storage/)
+- See the verified memory checks and the remaining gameplay comparisons. [Xbox 360 accuracy](ACCURACY.md)
+- Build or run the standalone graphics checks. [Direct3D 12 renderer](host/renderer_trace/README.md) · [Vulkan renderer](host/renderer_trace/vulkan/README.md)
+- Find the pinned SDK and its storage documentation. [ReXGlue 0.11.0](https://github.com/rexglue/rexglue-sdk/releases/tag/v0.11.0) · [Shader and storage documentation](https://docs.rexglue.com/filesystem/folders-and-storage/)

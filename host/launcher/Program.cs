@@ -22,8 +22,11 @@ namespace AsurasWrath.Launcher
     internal static class Program
     {
         [STAThread]
-        public static int Main()
+        public static int Main(string[] args)
         {
+            bool playWorker = args.Length != 0 && args[0] == GameLaunch.WorkerCommand;
+            bool shaderWorker = args.Length != 0 && args[0] == GameLaunch.ShaderWorkerCommand;
+            bool importWorker = args.Length != 0 && args[0] == GameImport.WorkerCommand;
             try
             {
                 string root = AppDomain.CurrentDomain.BaseDirectory;
@@ -31,11 +34,16 @@ namespace AsurasWrath.Launcher
                 if (File.Exists(Path.Combine(engine, "Build.ps1"))) root = engine;
                 if (!File.Exists(Path.Combine(root, "Build.ps1")))
                     throw new FileNotFoundException("Extract the complete download before opening the launcher.");
-                return new Application().Run(new LauncherWindow(new Project(root)).Window);
+                var project = new Project(root);
+                if (playWorker) return GameLaunch.Run(project, args);
+                if (shaderWorker) return GameLaunch.PrepareShaders(project, args);
+                if (importWorker) return GameImport.Run(project, args);
+                return new Application().Run(new LauncherWindow(project).Window);
             }
             catch (Exception error)
             {
-                MessageBox.Show(error.GetBaseException().Message, "WrathFall",
+                if (playWorker || shaderWorker || importWorker) Console.Error.WriteLine(error.Message);
+                else MessageBox.Show(error.GetBaseException().Message, "WrathFall",
                     MessageBoxButton.OK, MessageBoxImage.Error);
                 return 1;
             }
@@ -150,10 +158,12 @@ namespace AsurasWrath.Launcher
             });
             On("PrepareShaders", delegate
             {
-                Start("Preparing recorded shaders", "Build.ps1", ReadGraphics().Arguments("PrepareShaders", TemporalAvailable).ToArray());
+                if (job == null)
+                    BeginJob(BackgroundJob.StartShaderPreparation(project, ReadGraphics(), TemporalAvailable));
             });
             On("Play", delegate
             {
+                if (job != null) return;
                 applying = true;
                 try
                 {
@@ -163,7 +173,7 @@ namespace AsurasWrath.Launcher
                 finally { applying = false; }
                 GraphicsSettings settings = ReadGraphics();
                 Save();
-                Start("Running game", "Build.ps1", settings.Arguments("Run", TemporalAvailable).ToArray(), null, true);
+                BeginJob(BackgroundJob.StartGame(project, settings));
             });
             On("LoadAchievements", delegate
             {
@@ -504,10 +514,11 @@ namespace AsurasWrath.Launcher
 
         private void Choose(string kind, string title, string filter, bool multiple)
         {
+            if (job != null) return;
             var dialog = new OpenFileDialog { Filter = filter, Multiselect = multiple, CheckFileExists = true };
             if (dialog.ShowDialog(Window) != true) return;
             string input = project.SaveImportSelection(dialog.FileNames);
-            try { Start(title, "Import-GameFiles.ps1", new[] { "-Kind", kind, "-PathsFile", input }, input); }
+            try { BeginJob(BackgroundJob.StartImport(project, title, kind, input)); }
             catch { DeleteSelection(input); throw; }
         }
 
@@ -520,11 +531,16 @@ namespace AsurasWrath.Launcher
             catch { DeleteSelection(input); throw; }
         }
 
-        private void Start(string title, string script, string[] arguments, string input = null, bool game = false)
+        private void Start(string title, string script, string[] arguments, string input = null)
         {
             if (job != null) return;
-            job = BackgroundJob.Start(project.Root, title, script, arguments, input, game);
-            status = title + "…";
+            BeginJob(BackgroundJob.Start(project.Root, title, script, arguments, input));
+        }
+
+        private void BeginJob(BackgroundJob started)
+        {
+            job = started;
+            status = job.Title + "…";
             Log(status);
             if (page != "Achievements") Navigate("Play");
             Refresh();

@@ -29,19 +29,57 @@ namespace AsurasWrath.Launcher
         }
 
         public static BackgroundJob Start(string root, string title, string script, IEnumerable<string> arguments,
-                                          string input, bool isGame)
+                                          string input)
         {
             string system = Environment.GetFolderPath(Environment.SpecialFolder.System);
             string shell = Path.Combine(system, @"WindowsPowerShell\v1.0\powershell.exe");
-            var command = new[] { shell, "-NoLogo", "-NoProfile", "-NonInteractive",
+            var command = new[] { "-NoLogo", "-NoProfile", "-NonInteractive",
                 "-ExecutionPolicy", "RemoteSigned", "-File", Path.Combine(root, script) }.Concat(arguments);
+            return StartJob(root, title, shell, command, input, false, true);
+        }
+
+        public static BackgroundJob StartGame(Project project, GraphicsSettings settings)
+        {
+            string launcher = typeof(Program).Assembly.Location;
+            return StartJob(project.Root, "Running game", launcher,
+                new[] { GameLaunch.WorkerCommand, GameLaunch.Serialize(settings) }, null, true, false);
+        }
+
+        public static BackgroundJob StartShaderPreparation(Project project, GraphicsSettings settings, bool temporal)
+        {
+            string launcher = typeof(Program).Assembly.Location;
+            var request = new ShaderPreparationRequest { Renderer = settings.RuntimeRenderer, Upscaler = settings.ActiveUpscaler(temporal) };
+            return StartJob(project.Root, "Preparing recorded shaders", launcher,
+                new[] { GameLaunch.ShaderWorkerCommand, GameLaunch.SerializePreparation(request) }, null, false, false);
+        }
+
+        public static BackgroundJob StartImport(Project project, string title, string kind, string input)
+        {
+            string launcher = typeof(Program).Assembly.Location;
+            return StartJob(project.Root, title, launcher, new[] { GameImport.WorkerCommand, kind, input }, input, false, false);
+        }
+
+        private static BackgroundJob StartJob(string root, string title, string executable,
+                                             IEnumerable<string> arguments, string input, bool isGame, bool powershell)
+        {
             string logDirectory = Path.Combine(root, "out", "logs");
             Directory.CreateDirectory(logDirectory);
             string stem = "launcher-" + DateTime.Now.ToString("yyyyMMdd-HHmmss-fff") + "-" +
                 Guid.NewGuid().ToString("N").Substring(0, 6);
             string output = Path.Combine(logDirectory, stem + ".log");
             string error = Path.Combine(logDirectory, stem + ".err.log");
+            return StartProcess(root, title, executable, arguments, output, error, input, isGame, powershell);
+        }
 
+        internal static BackgroundJob StartCollector(string root, string executable, IEnumerable<string> arguments,
+                                                     string output, string error)
+        {
+            return StartProcess(root, "gameplay collector", executable, arguments, output, error, null, false, false);
+        }
+
+        private static BackgroundJob StartProcess(string root, string title, string executable,
+            IEnumerable<string> arguments, string output, string error, string input, bool isGame, bool powershell)
+        {
             using (var stdin = OpenHandle("NUL", 0x80000000, 3))
             using (var stdout = OpenHandle(output, 0x40000000, 1))
             using (var stderr = OpenHandle(error, 0x40000000, 1))
@@ -56,15 +94,16 @@ namespace AsurasWrath.Launcher
                 };
                 ProcessInformation created;
                 const uint CreateNoWindow = 0x08000000, CreateUnicodeEnvironment = 0x00000400;
-                IntPtr environment = WorkerEnvironment();
+                IntPtr environment = powershell ? WorkerEnvironment() : IntPtr.Zero;
                 try
                 {
-                    if (!CreateProcess(shell, new StringBuilder(string.Join(" ", command.Select(Quote))),
+                    string command = Quote(executable) + " " + string.Join(" ", arguments.Select(Quote));
+                    if (!CreateProcess(executable, new StringBuilder(command),
                                        IntPtr.Zero, IntPtr.Zero, true, CreateNoWindow | CreateUnicodeEnvironment,
                                        environment, root, ref startup, out created))
                         throw new Win32Exception(Marshal.GetLastWin32Error(), "Unable to start " + title + ".");
                 }
-                finally { Marshal.FreeHGlobal(environment); }
+                finally { if (environment != IntPtr.Zero) Marshal.FreeHGlobal(environment); }
                 CloseHandle(created.Thread);
                 return new BackgroundJob(new SafeWaitHandle(created.Process, true), title, output, error, input, isGame);
             }
@@ -78,6 +117,12 @@ namespace AsurasWrath.Launcher
             if (result != 0 || !GetExitCodeProcess(process, out code))
                 throw new Win32Exception(Marshal.GetLastWin32Error());
             return true;
+        }
+
+        internal void WaitForExit(uint milliseconds)
+        {
+            uint result = WaitForSingleObject(process, milliseconds);
+            if (result != 0 && result != 258) throw new Win32Exception(Marshal.GetLastWin32Error());
         }
 
         public void Dispose() { process.Dispose(); }

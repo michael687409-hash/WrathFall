@@ -1,13 +1,13 @@
 #include "fsr_vulkan.h"
 #include "dlss_vulkan.h"
 #include "temporal_history.h"
+#include "temporalMotion.h"
 
 #include <Windows.h>
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdio>
-#include <fstream>
 #include <stdexcept>
 #include <vector>
 
@@ -58,8 +58,8 @@ struct Probe {
                VkAccessFlags dst_access, VkPipelineStageFlags src, VkPipelineStageFlags dst);
   VkDeviceMemory Allocate(VkMemoryRequirements requirements, VkMemoryPropertyFlags flags);
   void Run(const std::filesystem::path& runtime);
-  void RunMotionBaseline(const std::filesystem::path& shader);
-  VkDescriptorSet CreateMotionPipeline(const std::filesystem::path& shader, VkDeviceSize stats_size);
+  void RunMotionBaseline();
+  VkDescriptorSet CreateMotionPipeline(VkDeviceSize stats_size);
 
   HMODULE loader = nullptr;
   VkInstance instance = VK_NULL_HANDLE;
@@ -423,17 +423,7 @@ VkBufferImageCopy ImageCopy(VkDeviceSize offset) {
 
 #define LOAD_MOTION(name) const auto name = Require<PFN_##name>(vkGetDeviceProcAddr(device, #name), #name)
 
-VkDescriptorSet Probe::CreateMotionPipeline(const std::filesystem::path& shader, VkDeviceSize stats_size) {
-  std::ifstream file(shader, std::ios::binary | std::ios::ate);
-  const std::streamoff shader_bytes = file.tellg();
-  if (shader_bytes < 20 || shader_bytes % 4 || shader_bytes > 4 * 1024 * 1024) {
-    throw std::runtime_error("Invalid Vulkan motion SPIR-V file");
-  }
-  std::vector<uint32_t> code(static_cast<size_t>(shader_bytes) / sizeof(uint32_t));
-  file.seekg(0);
-  if (!file.read(reinterpret_cast<char*>(code.data()), shader_bytes) || code[0] != 0x07230203) {
-    throw std::runtime_error("Could not read Vulkan motion SPIR-V");
-  }
+VkDescriptorSet Probe::CreateMotionPipeline(VkDeviceSize stats_size) {
   LOAD_MOTION(vkCreateDescriptorSetLayout);
   LOAD_MOTION(vkCreateDescriptorPool);
   LOAD_MOTION(vkAllocateDescriptorSets);
@@ -476,7 +466,7 @@ VkDescriptorSet Probe::CreateMotionPipeline(const std::filesystem::path& shader,
   Check(vkCreatePipelineLayout(device, &pipeline_layout, nullptr, &motion_layout), "Create motion pipeline layout");
   VkShaderModule module = VK_NULL_HANDLE;
   const VkShaderModuleCreateInfo module_info{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
-      nullptr, 0, code.size() * sizeof(uint32_t), code.data()};
+      nullptr, 0, sizeof(kTemporalMotion), kTemporalMotion};
   Check(vkCreateShaderModule(device, &module_info, nullptr, &module), "Create motion shader module");
   VkComputePipelineCreateInfo pipeline{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
   pipeline.stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0,
@@ -488,7 +478,7 @@ VkDescriptorSet Probe::CreateMotionPipeline(const std::filesystem::path& shader,
   return set;
 }
 
-void Probe::RunMotionBaseline(const std::filesystem::path& shader) {
+void Probe::RunMotionBaseline() {
   using namespace motion_test;
   constexpr VkDeviceSize pixels = VkDeviceSize(kRender.width) * kRender.height;
   constexpr VkDeviceSize stats_size = 260 * sizeof(uint32_t);
@@ -518,7 +508,7 @@ void Probe::RunMotionBaseline(const std::filesystem::path& shader) {
   vkGetBufferMemoryRequirements(device, readback, &requirements);
   readback_memory = Allocate(requirements, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
   Check(vkBindBufferMemory(device, readback, readback_memory, 0), "Bind motion test buffer");
-  const VkDescriptorSet set = CreateMotionPipeline(shader, stats_size);
+  const VkDescriptorSet set = CreateMotionPipeline(stats_size);
   LOAD_MOTION(vkCmdCopyBufferToImage);
   LOAD_MOTION(vkCmdFillBuffer);
   LOAD_MOTION(vkCmdBindPipeline);
@@ -638,17 +628,18 @@ void Probe::RunMotionBaseline(const std::filesystem::path& shader) {
 
 int wmain(int argc, wchar_t** argv) {
   std::setvbuf(stdout, nullptr, _IONBF, 0);
-  const auto provider = argc == 3 ? std::wstring_view(argv[1]) : std::wstring_view{};
-  if (provider != L"fsr3" && provider != L"dlss" && provider != L"motion") {
+  const auto mode = argc > 1 ? std::wstring_view(argv[1]) : std::wstring_view{};
+  const bool motion = argc == 2 && mode == L"motion";
+  if (!motion && !(argc == 3 && (mode == L"fsr3" || mode == L"dlss"))) {
     std::fprintf(stderr, "Usage: temporal_probe <fsr3|dlss> <vendor runtime directory>\n"
-                         "       temporal_probe motion <live motion SPIR-V file>\n");
+                         "       temporal_probe motion\n");
     return 2;
   }
   try {
     Probe probe;
-    const std::filesystem::path runtime(argv[2]);
-    probe.Initialize(provider == L"dlss" ? runtime : std::filesystem::path{});
-    if (provider == L"motion") probe.RunMotionBaseline(runtime);
+    const auto runtime = motion ? std::filesystem::path{} : std::filesystem::path(argv[2]);
+    probe.Initialize(mode == L"dlss" ? runtime : std::filesystem::path{});
+    if (motion) probe.RunMotionBaseline();
     else probe.Run(runtime);
     return 0;
   } catch (const std::exception& error) {

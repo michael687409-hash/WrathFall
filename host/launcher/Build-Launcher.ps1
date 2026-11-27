@@ -23,10 +23,12 @@ if (Test-Path -LiteralPath $hero -PathType Leaf) { $options += "/resource:$hero,
 foreach ($assembly in @(
     'WPF\PresentationFramework.dll', 'WPF\PresentationCore.dll', 'WPF\WindowsBase.dll', 'System.Xaml.dll'
     'System.Web.Extensions.dll', 'System.Windows.Forms.dll', 'System.Drawing.dll'
+    'System.IO.Compression.dll', 'System.IO.Compression.FileSystem.dll'
 )) {
     $options += '/reference:' + (Join-Path $framework $assembly)
 }
-$options += @('Program.cs', 'Project.cs', 'BackgroundJob.cs') | ForEach-Object { Join-Path $PSScriptRoot $_ }
+$options += @('Program.cs', 'Project.cs', 'BackgroundJob.cs', 'GameLaunch.cs', 'GameLaunchInputs.cs', 'GameImport.cs') |
+    ForEach-Object { Join-Path $PSScriptRoot $_ }
 & $compiler @options
 if ($LASTEXITCODE -ne 0) { throw "Launcher compilation failed ($LASTEXITCODE)." }
 Get-Item -LiteralPath $target

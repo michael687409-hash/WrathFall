@@ -1,55 +1,53 @@
 # Vulkan temporal upscaling
 
-The Vulkan provider code currently runs in an offscreen GPU probe. On a GeForce RTX
-5070 Ti, both FSR 3.1.6 and DLSS preset K processed a 1280 × 720 input into a
-2560 × 1440 storage image. Copying the output to host-visible memory returned
-average RGB values of 51, 153, and 229 for a known flat-color test image.
-Both tests used the same images and the signed vendor libraries already pinned
-by WrathFall. The probe uses Vulkan 1.3 for core feature negotiation.
+## Build and check the Vulkan renderer
 
-Use an x64 Visual Studio developer shell. The probe takes the directory that
-contains the Khronos Vulkan headers, with `vulkan/vulkan.h` underneath. The
-verified build used Vulkan-Headers 1.3.280 and the SPIR-V-enabled DirectX Shader
-Compiler 1.8.2505.1, distributed by Microsoft on GitHub.
+Use an x64 Visual Studio developer shell with CMake, Ninja, and Python. Set the
+dependency paths to the pinned ReXGlue 0.11.0 SDK and sources, Vulkan-Headers
+1.4.313, VMA 3.3.0, and glslang at
+`f4f1d8a352ca1908943aea2ad8c54b39b4879080`.
+Set `$vulkanInclude` to the directory containing `vulkan/vulkan.h`,
+`$vmaInclude` to the directory containing `vk_mem_alloc.h`, and
+`$glslangSource` to the glslang source directory. From the project root:
 
 ```powershell
-./Build-Probe.ps1 -VulkanInclude <headers> -OutputDirectory <build> -Dxc <dxc.exe>
-<build>/temporal_probe.exe fsr3 <FidelityFX signedbin>
-<build>/temporal_probe.exe dlss <Streamline bin/x64>
+$tools = (Resolve-Path .tools).Path
+$build = 'out/build/vulkan-temporal'
+cmake -S host/renderer_trace/vulkan -B $build -G Ninja -DCMAKE_BUILD_TYPE=Release `
+  "-DCMAKE_CXX_COMPILER=$tools/llvm-20.1.8/bin/clang++.exe" `
+  "-Dproject_tools=$tools" "-Drexglue_DIR=$tools/rexglue-0.11.0/win-amd64/lib/cmake/rexglue" `
+  "-Dvulkan_include=$vulkanInclude" "-Dvma_include=$vmaInclude" "-Dglslang_source=$glslangSource"
+cmake --build $build --target asura_vulkan check_vulkan_motion
 ```
 
-The shader build reuses the game's existing depth/motion and FSR reactive-mask
-HLSL. The SPIR-V in descriptor set 0 uses a uniform buffer at binding 0,
-sampled images at 1–3, and storage images at 4 (motion or reactive mask) and
-5 (normalized depth). Reactivity uses a separate linear sampler at binding 6.
-The compiled storage formats are RG32F for motion and R32F for depth or
-reactivity. The expected camera constant offsets are 0, 64, 72, 80, 88, 92,
-96, 100, and 112 bytes. The probe's test uses synthetic depth and motion
-inputs. Live Vulkan shader dispatch and camera inputs need in-game validation.
-
-## Offscreen motion baseline
-
-Build the probe with glslang to compile the same motion shader that the live
-renderer uses. This test runs on a Vulkan GPU with synthetic 720p frames.
-
-```powershell
-./Build-Probe.ps1 -VulkanInclude <headers> -OutputDirectory <build> -GlslangValidator <glslangValidator.exe>
-<build>/temporal_probe.exe motion <build>/live-motion.spv
-```
-
-The probe reads back motion vectors and the reactive mask. It checks a static
-scene, a known camera pan, separate object motion, and reset behavior on the
-first frame, after a camera cut, after a frame gap, and when a camera is
+The live driver and probe both embed the motion shader from the same generated
+`temporalMotion.h` in this build. The motion check runs offscreen with
+synthetic 720p frames and reads back vectors and the reactive mask. It checks a
+static scene, a known camera pan, separate object motion, and history resets on
+the first frame, after a camera cut, after a frame gap, and when a camera is
 reacquired. The probe and live renderer use the same history-reset decision.
+Use `cmake --build $build --target check_vulkan_motion` to repeat the check
+without rebuilding the driver.
+
+## Offscreen upscaler checks
+
+The `asura_vulkan_probe` target builds `temporal_probe.exe`. Its provider modes
+use a Vulkan 1.3 device and process a known 1280 × 720 image into a 2560 × 1440
+storage image. Both FSR 3.1.6 and DLSS preset K returned mean RGB values of
+51, 153, and 229 on an RTX 5070 Ti.
+
+```powershell
+$vendors = "$tools/renderer-deps"
+& "$build/temporal_probe.exe" fsr3 "$vendors/fsr-2.4.0/FidelityFX-SDK-2.4.0/Kits/FidelityFX/signedbin"
+& "$build/temporal_probe.exe" dlss "$vendors/streamline-2.14.16/bin/x64"
+```
+
+To cross-compile the separate Direct3D 12 depth/motion and FSR reactive-mask
+HLSL for experiments, configure the same build with
+`-Ddxc_executable=<path to dxc.exe>` and build the `vulkan_hlsl_spirv` target.
+It generates SPIR-V and disassembly listings.
 
 ## Live renderer integration
-
-The experimental renderer target builds the pinned ReXGlue 0.11.0 Vulkan
-driver. Configure this directory with `project_tools`, `vulkan_include`,
-`vma_include`, `glslang_source`, and the installed `rexglue_DIR`. The
-verified dependencies are Vulkan-Headers 1.4.313, VMA 3.3.0, and glslang at
-`f4f1d8a352ca1908943aea2ad8c54b39b4879080`, the SDK's pinned submodule.
-glslang needs Python for its build metadata. Build `asura_vulkan` in Release.
 
 Set `WRATHFALL_VK_SCENE_TRACE` to a trace file for draw, resolve, and present
 evidence. On a queue that supports timestamps, `gpu-timing` rows record the
