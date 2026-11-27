@@ -17,12 +17,18 @@ if(WIN32 AND CMAKE_CXX_COMPILER_ID STREQUAL "Clang" AND
   set(CMAKE_CXX_CREATE_STATIC_LIBRARY "<CMAKE_AR> /NOLOGO /OUT:<TARGET> <OBJECTS>")
 endif()
 
-set(ENABLE_GLSLANG_BINARIES OFF CACHE BOOL "" FORCE)
+set(ENABLE_GLSLANG_BINARIES ON CACHE BOOL "" FORCE)
 set(ENABLE_HLSL OFF CACHE BOOL "" FORCE)
 set(ENABLE_OPT OFF CACHE BOOL "" FORCE)
 set(GLSLANG_TESTS OFF CACHE BOOL "" FORCE)
 set(SKIP_GLSLANG_INSTALL ON CACHE BOOL "" FORCE)
 add_subdirectory("${glslang_source}" glslang EXCLUDE_FROM_ALL)
+if(WIN32 AND CMAKE_CXX_COMPILER_ID STREQUAL "Clang" AND
+   CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "GNU")
+  get_target_property(glslang_link_options glslangValidator LINK_OPTIONS)
+  list(REMOVE_ITEM glslang_link_options "-Wl,-undefined,error")
+  set_property(TARGET glslangValidator PROPERTY LINK_OPTIONS "${glslang_link_options}")
+endif()
 
 # Share the pinned SDK's driver source inventory while linking its installed host ABI.
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${xenos}/CMakeLists.txt")
@@ -44,16 +50,31 @@ foreach(group BASE SPIRV VULKAN HOST VULKAN_HOST)
 endforeach()
 
 include(VulkanHooks.cmake)
+set(temporal_shaders)
+foreach(pass IN ITEMS Unpack Motion Compose History)
+  string(TOUPPER "${pass}" define)
+  set(shader "${CMAKE_CURRENT_BINARY_DIR}/include/temporal${pass}.h")
+  add_custom_command(OUTPUT "${shader}"
+    COMMAND "${CMAKE_COMMAND}" -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/include"
+    COMMAND glslangValidator -V --target-env vulkan1.2 "-D${define}=1"
+      --vn "kTemporal${pass}" -o "${shader}" "${CMAKE_CURRENT_SOURCE_DIR}/live_temporal.comp"
+    DEPENDS glslangValidator "${CMAKE_CURRENT_SOURCE_DIR}/live_temporal.comp"
+    VERBATIM)
+  list(APPEND temporal_shaders "${shader}")
+endforeach()
+
 set(fidelityfx "${project_tools}/renderer-deps/fsr-2.4.0/FidelityFX-SDK-2.4.0/Kits/FidelityFX")
 set(streamline "${project_tools}/renderer-deps/streamline-2.14.16")
-add_library(asura_vulkan SHARED ${vulkan_sources} live_scene.cpp dlss_vulkan.cpp fsr_vulkan.cpp)
+add_library(asura_vulkan SHARED ${vulkan_sources} live_scene.cpp live_temporal.cpp
+  dlss_vulkan.cpp fsr_vulkan.cpp ${temporal_shaders})
 target_include_directories(asura_vulkan PRIVATE "${sdk_source}/src" "${sdk_source}"
   "${sdk_source}/thirdparty/renderdoc" "${project_tools}/renderer-deps/xxhash"
   "${vulkan_include}" "${vma_include}" "${glslang_source}" "${xenos}"
   "${CMAKE_CURRENT_SOURCE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/include")
 target_include_directories(asura_vulkan SYSTEM PRIVATE
   "${fidelityfx}/api/include" "${fidelityfx}/upscalers/include" "${streamline}/include")
-target_include_directories(asura_vulkan PRIVATE "${project_tools}/../host/renderer_trace")
+target_include_directories(asura_vulkan PRIVATE "${project_tools}/../host/renderer_trace"
+  "${project_tools}/../host")
 target_compile_definitions(asura_vulkan PRIVATE
   REX_GPU_XENOS_STATIC XXH_INLINE_ALL REXGLUE_BUILD_CONFIG="$<CONFIG>")
 target_link_libraries(asura_vulkan PRIVATE rex::base rex::xenos glslang SPIRV dxgi)

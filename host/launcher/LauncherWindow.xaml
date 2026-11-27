@@ -299,6 +299,9 @@
                   </StackPanel>
                 </StackPanel>
               </Grid>
+              <TextBlock x:Name="VulkanUpscalingNote" Visibility="Collapsed" TextWrapping="Wrap"
+                         Foreground="{StaticResource Muted}" Margin="0,12,0,0"
+                         Text="Experimental Vulkan upscaling uses a 720p internal image at 2560 × 1440 output. Enable the gameplay collector and press L to mark visual issues."/>
               <WrapPanel Margin="0,18,0,3">
                 <CheckBox x:Name="VSync" Content="VSync" Margin="0,0,18,8"/>
               </WrapPanel>

@@ -14,6 +14,7 @@ class VulkanCommandProcessor;
 namespace wrathfall::vulkan_live {
 
 bool Enabled();
+bool TemporalRequested();
 void PrepareInstance(uint32_t api_version, std::span<const VkExtensionProperties> available,
                      std::vector<const char*>& enabled);
 bool PrepareDevice(VkPhysicalDevice physical, VkPhysicalDeviceProperties properties,
@@ -36,8 +37,16 @@ bool Draw(uint64_t frame, uint64_t vertex, uint64_t pixel, uint32_t width, uint3
           uint32_t color_base, uint32_t depth_base, bool host_targets, bool depth, bool stencil,
           const std::array<float, 16>& camera, float near_depth, float far_depth,
           uint32_t color_format, uint32_t pitch_pixels, uint32_t samples);
-void CopyInterlockInput(rex::gpu::vulkan::VulkanCommandProcessor& processor, VkBuffer edram,
-                        bool depth);
+bool NeedsColorBeforeResolve(uint64_t frame);
+void CopyInterlockInput(rex::gpu::vulkan::VulkanCommandProcessor& processor, uint64_t frame,
+                        VkBuffer edram, bool depth);
+std::array<float, 2> Jitter(uint64_t frame);
+bool CanPresentTemporal(uint64_t frame, uint32_t width, uint32_t height);
+bool ScheduleTemporal(uint64_t frame,
+                      VkImage image, VkImageView output, bool written, VkImageView guest,
+                      uint32_t guest_width, uint32_t guest_height, bool swap_red_blue,
+                      const std::array<uint32_t, 256>& gamma);
+void RecordTemporal(VkCommandBuffer command);
 bool CaptureReady();
 void ReadInterlockInputs(const rex::gpu::vulkan::VulkanCommandProcessor& processor);
 void Present(uint64_t frame, uint32_t frontbuffer, uint32_t width, uint32_t height);

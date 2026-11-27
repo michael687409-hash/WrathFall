@@ -50,7 +50,7 @@ namespace AsurasWrath.Launcher
         private static readonly string[] CheckNames = { "VSync", "Collector" };
         private static readonly string[] JobButtons = { "ChooseDisc", "ChooseUpdate", "ChooseDlc", "ResetGraphics" };
         private readonly Project project;
-        private readonly bool temporal;
+        private bool TemporalAvailable { get { return !string.IsNullOrEmpty(Selected("Upscaler")); } }
         private readonly DispatcherTimer timer;
         private BackgroundJob job;
         private bool applying, changed;
@@ -66,18 +66,16 @@ namespace AsurasWrath.Launcher
             using (var icon = System.Drawing.Icon.ExtractAssociatedIcon(typeof(Program).Assembly.Location))
                 if (icon != null) Window.Icon = Imaging.CreateBitmapSourceFromHIcon(icon.Handle,
                     Int32Rect.Empty, System.Windows.Media.Imaging.BitmapSizeOptions.FromEmptyOptions());
-            string[] upscalers = project.AvailableUpscalers();
-            temporal = upscalers.Length != 0;
             Add("Renderer", "d3d12", "Direct3D 12");
             Add("Renderer", "vulkan", "Vulkan");
+            if (project.HasExperimentalVulkan)
+                Add("Renderer", "vulkan-temporal", "Vulkan (experimental upscaling)");
             Add("DisplayMode", "windowed", "Windowed");
             Add("DisplayMode", "borderless", "Borderless windowed");
             Add("DisplayMode", "fullscreen", "Exclusive fullscreen");
             foreach (string rate in new[] { "30", "60", "120", "144" })
                 Add("FrameRate", rate, rate + " FPS");
             Add("FrameRate", "0", "Uncapped");
-            foreach (string provider in upscalers)
-                Add("Upscaler", provider, ProviderName(provider));
             Add("DlssPreset", "Default", "Driver default");
             foreach (string model in new[] { "J", "K", "L", "M" })
                 Add("DlssPreset", model, "Model " + model);
@@ -89,7 +87,7 @@ namespace AsurasWrath.Launcher
                 Add("TextureFiltering", (i - 1).ToString(CultureInfo.InvariantCulture), filtering[i]);
 
             GraphicsSettings initial;
-            try { initial = project.LoadSettings(temporal); }
+            try { initial = project.LoadSettings(project.AvailableUpscalers().Length != 0); }
             catch (Exception error)
             {
                 initial = new GraphicsSettings();
@@ -97,8 +95,16 @@ namespace AsurasWrath.Launcher
             }
             Apply(initial);
             foreach (string name in ComboNames.Where(name => name != "Resolution" && name != "DisplayMode" &&
-                name != "DisplayMonitor"))
+                name != "DisplayMonitor" && name != "Renderer"))
                 Control<ComboBox>(name).SelectionChanged += delegate { GraphicsChanged(); };
+            Control<ComboBox>("Renderer").SelectionChanged += delegate
+            {
+                if (applying) return;
+                applying = true;
+                try { LoadUpscalers(Selected("Upscaler")); }
+                finally { applying = false; }
+                GraphicsChanged();
+            };
             Control<ComboBox>("Resolution").SelectionChanged += delegate
             {
                 if (applying) return;
@@ -142,7 +148,7 @@ namespace AsurasWrath.Launcher
             });
             On("PrepareShaders", delegate
             {
-                Start("Preparing recorded shaders", "Build.ps1", ReadGraphics().Arguments("PrepareShaders", temporal).ToArray());
+                Start("Preparing recorded shaders", "Build.ps1", ReadGraphics().Arguments("PrepareShaders", TemporalAvailable).ToArray());
             });
             On("Play", delegate
             {
@@ -155,7 +161,7 @@ namespace AsurasWrath.Launcher
                 finally { applying = false; }
                 GraphicsSettings settings = ReadGraphics();
                 Save();
-                Start("Running game", "Build.ps1", settings.Arguments("Run", temporal).ToArray(), null, true);
+                Start("Running game", "Build.ps1", settings.Arguments("Run", TemporalAvailable).ToArray(), null, true);
             });
             On("ResetGraphics", delegate
             {
@@ -281,13 +287,21 @@ namespace AsurasWrath.Launcher
             LoadMonitors(value.DisplayMonitor);
             LoadResolutions();
             Pick("FrameRate", value.FrameRate.ToString(CultureInfo.InvariantCulture), "0");
-            Pick("Upscaler", value.Upscaler, "dlss");
+            LoadUpscalers(value.Upscaler);
             Pick("DlssPreset", value.DlssPreset, "K");
             Pick("AntiAliasing", value.AntiAliasing, "none");
             Pick("TextureFiltering", value.TextureFiltering.ToString(CultureInfo.InvariantCulture), "3");
             Control<CheckBox>("VSync").IsChecked = value.VSync;
             Control<CheckBox>("Collector").IsChecked = value.GameplayCollectorEnabled;
             applying = false;
+        }
+
+        private void LoadUpscalers(string preferred)
+        {
+            Control<ComboBox>("Upscaler").Items.Clear();
+            foreach (string provider in project.AvailableUpscalers(Selected("Renderer")))
+                Add("Upscaler", provider, ProviderName(provider));
+            Pick("Upscaler", preferred, "dlss");
         }
 
         private GraphicsSettings ReadGraphics()
@@ -371,14 +385,15 @@ namespace AsurasWrath.Launcher
             bool ready = disc && update;
             int dlc = project.DlcCount();
             GraphicsSettings graphics = ReadGraphics();
-            string upscaler = graphics.ActiveUpscaler(temporal);
-            bool cache = project.HasShaderCache(graphics.Renderer, upscaler != "native");
+            string upscaler = graphics.ActiveUpscaler(TemporalAvailable);
+            bool cache = project.HasShaderCache(graphics.RuntimeRenderer, upscaler != "native");
             bool original = graphics.OutputResolution == "1280x720";
             Visible("UpscalerPanel", upscaler != "native");
             Visible("ModelPanel", upscaler == "dlss");
             Visible("AaPanel", upscaler == "native");
             Visible("AntiAliasing", !original);
             Visible("NativeAa", original);
+            Visible("VulkanUpscalingNote", graphics.Renderer == "vulkan-temporal");
 
             foreach (string name in ComboNames.Concat(CheckNames).Concat(JobButtons))
                 Control<Control>(name).IsEnabled = available;
@@ -388,7 +403,7 @@ namespace AsurasWrath.Launcher
             build.Content = built ? "Installed" : "Build";
             build.Tag = built ? "installed" : null;
             Control<Button>("PrepareShaders").IsEnabled = available && ready && built && cache;
-            bool prepared = cache && project.ShadersPrepared(graphics, temporal);
+            bool prepared = cache && project.ShadersPrepared(graphics, TemporalAvailable);
             Control<Button>("PrepareShaders").Content = prepared ? "Recompile Shaders" : "Precompile Shaders";
             Control<Button>("LoadAchievements").IsEnabled = available && (ready || File.Exists(project.Catalog));
             Control<Button>("LoadAchievements").Content = File.Exists(project.Catalog) ? "Refresh" : "Load achievements";
@@ -480,9 +495,11 @@ namespace AsurasWrath.Launcher
                 title == "Running game" ? "Game closed" : "Operation complete";
             if (exitCode == 0 && title == "Installing DLSS runtime")
             {
-                if (project.AvailableUpscalers().Contains("dlss"))
+                if (project.AvailableUpscalers(Selected("Renderer")).Contains("dlss"))
                 {
-                    Add("Upscaler", "dlss", ProviderName("dlss"));
+                    applying = true;
+                    try { LoadUpscalers(Selected("Upscaler")); }
+                    finally { applying = false; }
                     status = "DLSS runtime installed";
                     Navigate("Graphics");
                 }

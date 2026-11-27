@@ -3,6 +3,8 @@
 #include "live_scene.h"
 #include "dlss_vulkan.h"
 #include "fsr_vulkan.h"
+#include "live_temporal.h"
+#include "upscaler_events.h"
 
 #include <Windows.h>
 #include <algorithm>
@@ -13,6 +15,7 @@
 #include <fstream>
 #include <memory>
 #include <stdexcept>
+#include <utility>
 
 namespace wrathfall::vulkan_live {
 namespace {
@@ -28,6 +31,7 @@ struct SceneEvidence {
   unsigned depth_format = 0, depth_pitch_tiles = 0, depth_tile_base = 0, depth_size = 0;
   unsigned color_format = 0, color_pitch_pixels = 0, color_samples = 0;
   uint64_t first_overlay_vs = 0, first_overlay_ps = 0;
+  asura::upscaler_events::ShaderPair motion_shader{};
   bool host_compositor = false;
   bool compositor = false;
   bool host_depth_image = false;
@@ -61,6 +65,44 @@ std::ofstream& Log() {
 thread_local std::unique_ptr<FsrVulkan> fsr_probe;
 std::unique_ptr<DlssVulkan> dlss_probe;
 VkDevice dlss_device = VK_NULL_HANDLE;
+bool dlss_bound = false;
+thread_local std::unique_ptr<Temporal> temporal;
+thread_local uint64_t temporal_frame = UINT64_MAX, scheduled_frame = UINT64_MAX;
+thread_local uint64_t recent_gameplay = UINT64_MAX, last_upscaled = UINT64_MAX;
+thread_local bool temporal_depth = false, temporal_color = false, temporal_failed = false;
+
+SceneEvidence& Evidence(uint64_t frame);
+
+std::string_view SelectedProvider() {
+  static const auto provider = EnvironmentPath(L"WRATHFALL_VK_TEMPORAL").native();
+  if (provider == L"dlss") return "dlss";
+  if (provider == L"fsr3") return "fsr3";
+  return {};
+}
+
+bool ProviderReady() {
+  return SelectedProvider() == "dlss" ? dlss_bound : SelectedProvider() == "fsr3" && fsr_probe;
+}
+
+std::ofstream& Events() {
+  static auto stream = [] {
+    using namespace asura::upscaler_events;
+    const auto file = File(EnvironmentPath(L"ASURA_UPSCALER_REPORT_DIR"), GetCurrentProcessId(), GetCurrentProcess());
+    if (file.empty()) return std::ofstream{};
+    std::ofstream out(file, std::ios::trunc);
+    out << kColumns << std::endl;
+    return out;
+  }();
+  return stream;
+}
+
+void Fallback(uint64_t frame, std::string_view reason) {
+  if (recent_gameplay == UINT64_MAX || frame - recent_gameplay > 30) return;
+  const auto& info = Evidence(frame);
+  using namespace asura::upscaler_events;
+  Write(Events(), false, frame, SelectedProvider(), reason,
+        {info.first_overlay_vs, info.first_overlay_ps}, info.motion_shader, "Vulkan");
+}
 
 // A 1280x720 single-sample Xenos target occupies 16x45 80x16 tiles.
 constexpr VkDeviceSize kTileBytes = 80 * 16 * sizeof(uint32_t);
@@ -121,7 +163,11 @@ SceneEvidence& Evidence(uint64_t frame) {
 }  // namespace
 
 bool Enabled() {
-  return Log().is_open();
+  return Log().is_open() || TemporalRequested();
+}
+
+bool TemporalRequested() {
+  return !SelectedProvider().empty();
 }
 
 void PrepareInstance(uint32_t api_version, std::span<const VkExtensionProperties> available,
@@ -168,9 +214,15 @@ void BindDevice(VkInstance instance, VkPhysicalDevice physical, VkDevice device,
                 uint32_t graphics_family) {
   dlss_device = device;
   try {
+    using Preset = asura::temporal::DlssPreset;
+    const auto model = EnvironmentPath(L"ASURA_DLSS_PRESET").native();
+    const auto preset = model == L"Default" ? Preset::Default : model == L"J" ? Preset::J
+        : model == L"L" ? Preset::L : model == L"M" ? Preset::M : Preset::K;
+    const char* names[] = {"Default", "J", "K", "L", "M"};
     dlss_probe->Bind(instance, physical, device, graphics_family, {1280, 720}, {2560, 1440},
-                     asura::temporal::DlssPreset::K, false);
-    Log() << "dlss-context\tK\t1280x720\t2560x1440" << std::endl;
+                     preset, TemporalRequested());
+    dlss_bound = true;
+    Log() << "dlss-context\t" << names[static_cast<size_t>(preset)] << "\t1280x720\t2560x1440" << std::endl;
   } catch (const std::exception& failure) {
     Log() << "dlss-context-error\t" << failure.what() << std::endl;
   }
@@ -180,6 +232,7 @@ void ReleaseDevice(VkDevice device) {
   if (!dlss_device || dlss_device != device) return;
   dlss_probe.reset();
   dlss_device = VK_NULL_HANDLE;
+  dlss_bound = false;
 }
 
 void ReleaseInstance() {
@@ -195,7 +248,8 @@ void Device(VkPhysicalDevice physical, VkDevice device, PFN_vkGetDeviceProcAddr 
   if (runtime.empty()) return;
   try {
     fsr_probe = std::make_unique<FsrVulkan>(runtime, physical, device, get_device_proc,
-                                            VkExtent2D{1280, 720}, VkExtent2D{2560, 1440}, false);
+                                            VkExtent2D{1280, 720}, VkExtent2D{2560, 1440},
+                                            TemporalRequested());
     Log() << "fsr-context\t" << fsr_probe->Provider() << "\t1280x720\t2560x1440" << std::endl;
   } catch (const std::exception& failure) {
     Log() << "fsr-context-error\t" << failure.what() << std::endl;
@@ -204,6 +258,7 @@ void Device(VkPhysicalDevice physical, VkDevice device, PFN_vkGetDeviceProcAddr 
 
 void Shutdown(const rex::gpu::vulkan::VulkanCommandProcessor& processor) {
   fsr_probe.reset();
+  temporal.reset();
   if (!capture.memory) return;
   const auto* vulkan = processor.GetVulkanDevice();
   const auto& f = vulkan->GetFunctions();
@@ -223,8 +278,10 @@ bool DepthResolve(uint64_t frame, bool interlock, bool host_image, uint32_t samp
   evidence.depth_pitch_tiles = pitch_tiles;
   evidence.depth_tile_base = tile_base;
   evidence.depth_size = extent_length;
-  return interlock && evidence.depth_resolved && samples == 1 && format == 1 && pitch_tiles == 16 &&
-         tile_base == 0 && CaptureRequested(frame) && !capture.depth;
+  if (!interlock || !evidence.depth_resolved || samples != 1 || format != 1 || pitch_tiles != 16 ||
+      tile_base != 0) return false;
+  if (ProviderReady() && !temporal_failed) return temporal_frame != frame || !temporal_depth;
+  return CaptureRequested(frame) && !capture.depth;
 }
 
 bool Draw(uint64_t frame, uint64_t vertex, uint64_t pixel, uint32_t width, uint32_t height,
@@ -233,22 +290,29 @@ bool Draw(uint64_t frame, uint64_t vertex, uint64_t pixel, uint32_t width, uint3
           uint32_t color_format, uint32_t pitch_pixels, uint32_t samples) {
   if (!Enabled()) return false;
   auto& evidence = Evidence(frame);
-  if (width == 640 && height == 360 && color_base == 1624 &&
+  const bool velocity = width == 640 && height == 360 && color_base == 1624 &&
       (pixel == 0xa9e9e8cbe344da0d || pixel == 0xcfc6d41016f07ac2 ||
-       pixel == 0xe7d0056ff4d559ee)) ++evidence.motion_draws;
-  if (width != 1280 || height != 720) return false;
-  if (depth && depth_base == 0) {
-    ++evidence.world_draws;
-    if (vertex == 0x05253eaa754b90a5 || vertex == 0x121a96d38a21bfdb) {
-      evidence.camera_found = near_depth < far_depth &&
-          std::all_of(camera.begin(), camera.end(), [](float value) { return std::isfinite(value); });
-      if (evidence.camera_found) {
-        evidence.camera = camera;
-        evidence.near_depth = near_depth;
-        evidence.far_depth = far_depth;
-      }
+       pixel == 0xe7d0056ff4d559ee);
+  if (velocity) {
+    ++evidence.motion_draws;
+    evidence.motion_shader = {vertex, pixel};
+    recent_gameplay = frame;
+  }
+  if (velocity || vertex == 0x05253eaa754b90a5 || vertex == 0x121a96d38a21bfdb) {
+    const float forward = camera[3] * camera[3] + camera[7] * camera[7] + camera[11] * camera[11];
+    const float horizontal = camera[0] * camera[0] + camera[4] * camera[4] + camera[8] * camera[8];
+    const float vertical = camera[1] * camera[1] + camera[5] * camera[5] + camera[9] * camera[9];
+    if (std::abs(forward - 1.0f) < 0.005f && horizontal > 0.25f &&
+        std::abs(vertical / horizontal - (16.0f / 9.0f) * (16.0f / 9.0f)) < 0.02f &&
+        std::all_of(camera.begin(), camera.end(), [](float value) { return std::isfinite(value); })) {
+      evidence.camera_found = true;
+      evidence.camera = camera;
+      evidence.near_depth = near_depth;
+      evidence.far_depth = far_depth;
     }
   }
+  if (width != 1280 || height != 720) return false;
+  if (depth && depth_base == 0) ++evidence.world_draws;
   if (color_base != 720) return false;
   if (vertex == 0x9ac7fba7d9196e93 && pixel == 0x2e571939e5c4f114) {
     evidence.compositor = true;
@@ -266,23 +330,47 @@ bool Draw(uint64_t frame, uint64_t vertex, uint64_t pixel, uint32_t width, uint3
     }
     if (vertex == 0x5bf4e342d00f1593 && pixel == 0x2c1e4e099e31e037) ++evidence.hud_blends;
     if (stencil) ++evidence.stencil_draws;
-    return !host_targets && evidence.screen_draws == 1 && evidence.color_format == 0 &&
-           evidence.color_pitch_pixels == 1280 && evidence.color_samples == 1 &&
-           CaptureRequested(frame) && capture.depth && !capture.color;
+    if (host_targets || evidence.screen_draws != 1 || evidence.color_format != 0 ||
+        evidence.color_pitch_pixels != 1280 || evidence.color_samples != 1) return false;
+    if (temporal && temporal_frame == frame) return temporal_depth && !temporal_color;
+    return CaptureRequested(frame) && capture.depth && !capture.color;
   }
   return false;
 }
 
-void CopyInterlockInput(rex::gpu::vulkan::VulkanCommandProcessor& processor, VkBuffer edram,
-                        bool depth) {
+bool NeedsColorBeforeResolve(uint64_t frame) {
+  const auto& info = Evidence(frame);
+  return temporal && temporal_frame == frame && temporal_depth && !temporal_color &&
+      info.compositor && !info.host_compositor && !info.screen_draws &&
+      info.color_format == 0 && info.color_pitch_pixels == 1280 && info.color_samples == 1;
+}
+
+void CopyInterlockInput(rex::gpu::vulkan::VulkanCommandProcessor& processor, uint64_t frame,
+                        VkBuffer edram, bool depth) {
   using namespace rex::gpu::vulkan;
-  if (!capture.buffer && !objects::CreateDedicatedAllocationBuffer(
+  const bool live = ProviderReady() && !temporal_failed;
+  if (live && !temporal) {
+    try {
+      temporal = std::make_unique<Temporal>(processor);
+      Log() << "temporal-ready\t" << SelectedProvider() << std::endl;
+    } catch (const std::exception& failure) {
+      temporal_failed = true;
+      Log() << "temporal-init-error\t" << failure.what() << std::endl;
+      return;
+    }
+  }
+  if (!live && !capture.buffer && !objects::CreateDedicatedAllocationBuffer(
           processor.GetVulkanDevice(), 2 * kInputBytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
           objects::MemoryPurpose::kReadback, capture.buffer, capture.memory, &capture.memory_type)) {
     capture.done = true;
     Log() << "input-capture-error\tCould not allocate readback buffer" << std::endl;
     return;
   }
+  if (live && temporal_frame != frame) {
+    temporal_frame = frame;
+    temporal_depth = temporal_color = false;
+  }
+  const VkBuffer target = live ? temporal->Inputs() : capture.buffer;
   const VkBufferCopy region{depth ? 0 : kColorBase, depth ? 0 : kInputBytes, kInputBytes};
   // The capture does not change the render target cache's tracked use of guest EDRAM.
   constexpr VkPipelineStageFlags writers = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
@@ -290,20 +378,78 @@ void CopyInterlockInput(rex::gpu::vulkan::VulkanCommandProcessor& processor, VkB
   constexpr VkAccessFlags writes = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
   processor.PushBufferMemoryBarrier(edram, region.srcOffset, region.size, writers,
       VK_PIPELINE_STAGE_TRANSFER_BIT, writes, VK_ACCESS_TRANSFER_READ_BIT);
-  processor.PushBufferMemoryBarrier(capture.buffer, region.dstOffset, region.size,
-      VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
-      VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_QUEUE_FAMILY_IGNORED,
+  processor.PushBufferMemoryBarrier(target, region.dstOffset, region.size,
+      VK_PIPELINE_STAGE_TRANSFER_BIT | (live ? VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT : 0),
+      VK_PIPELINE_STAGE_TRANSFER_BIT,
+      VK_ACCESS_TRANSFER_WRITE_BIT | (live ? VK_ACCESS_SHADER_READ_BIT : 0),
+      VK_ACCESS_TRANSFER_WRITE_BIT, VK_QUEUE_FAMILY_IGNORED,
       VK_QUEUE_FAMILY_IGNORED, false);
   processor.SubmitBarriers(true);
-  processor.GetDeferredCommandBuffer().CmdVkCopyBuffer(edram, capture.buffer, 1, &region);
+  processor.GetDeferredCommandBuffer().CmdVkCopyBuffer(edram, target, 1, &region);
   processor.PushBufferMemoryBarrier(edram, region.srcOffset, region.size,
       VK_PIPELINE_STAGE_TRANSFER_BIT, writers, VK_ACCESS_TRANSFER_READ_BIT,
       writes | VK_ACCESS_SHADER_READ_BIT);
-  processor.PushBufferMemoryBarrier(capture.buffer, region.dstOffset, region.size,
-      VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT,
-      VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_HOST_READ_BIT);
-  if (depth) capture.depth = true;
-  else capture.color = true;
+  processor.PushBufferMemoryBarrier(target, region.dstOffset, region.size,
+      VK_PIPELINE_STAGE_TRANSFER_BIT, live ? VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT : VK_PIPELINE_STAGE_HOST_BIT,
+      VK_ACCESS_TRANSFER_WRITE_BIT, live ? VK_ACCESS_SHADER_READ_BIT : VK_ACCESS_HOST_READ_BIT);
+  if (depth) (live ? temporal_depth : capture.depth) = true;
+  else (live ? temporal_color : capture.color) = true;
+}
+
+std::array<float, 2> Jitter(uint64_t frame) {
+  if (!temporal || last_upscaled == UINT64_MAX || last_upscaled + 1 != frame) return {};
+  const auto halton = [](uint32_t index, uint32_t base) {
+    float value = 0, weight = 1;
+    for (; index; index /= base) {
+      weight /= float(base);
+      value += weight * float(index % base);
+    }
+    return value - 0.5f;
+  };
+  const auto sample = uint32_t(frame % 32) + 1;
+  return {halton(sample, 2), halton(sample, 3)};
+}
+
+bool CanPresentTemporal(uint64_t frame, uint32_t width, uint32_t height) {
+  if (!TemporalRequested()) return false;
+  if (!temporal || !ProviderReady()) {
+    Fallback(frame, "provider-unavailable");
+    return false;
+  }
+  if (width != 1280 || height != 720 || temporal_frame != frame || !temporal_depth || !temporal_color) {
+    Fallback(frame, !temporal_depth || temporal_frame != frame ? "missing-scene-depth" : "missing-scene-color");
+    return false;
+  }
+  return recent_gameplay != UINT64_MAX && frame - recent_gameplay <= 30;
+}
+
+bool ScheduleTemporal(uint64_t frame,
+                      VkImage image, VkImageView output, bool written, VkImageView guest,
+                      uint32_t guest_width, uint32_t guest_height, bool swap_red_blue,
+                      const std::array<uint32_t, 256>& gamma) {
+  if (!temporal->Schedule(frame, image, output, written, guest, guest_width, guest_height,
+                          swap_red_blue, gamma, Log())) {
+    Fallback(frame, "in-flight-descriptors-busy");
+    return false;
+  }
+  scheduled_frame = frame;
+  return true;
+}
+
+void RecordTemporal(VkCommandBuffer command) {
+  if (scheduled_frame == UINT64_MAX) return;
+  const auto frame = std::exchange(scheduled_frame, UINT64_MAX);
+  const auto& evidence = Evidence(frame);
+  const bool dlss = SelectedProvider() == "dlss";
+  if (temporal->Record(command, dlss ? dlss_probe.get() : nullptr, dlss ? nullptr : fsr_probe.get(),
+                        evidence.camera, evidence.camera_found, Jitter(frame), evidence.motion_draws,
+                        evidence.screen_draws, evidence.hud_blends, evidence.stencil_draws, Log())) {
+    if (last_upscaled == UINT64_MAX || last_upscaled + 1 != frame)
+      asura::upscaler_events::Write(Events(), true, frame, SelectedProvider());
+    last_upscaled = frame;
+  } else {
+    Fallback(frame, "temporal-dispatch-failed");
+  }
 }
 
 bool CaptureReady() {

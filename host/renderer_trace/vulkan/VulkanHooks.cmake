@@ -44,6 +44,9 @@ replace_hook(vulkan_device "${anchor}" "${hook}")
 set(anchor [=[  const VkResult device_create_result =
       ifn.vkCreateDevice(physical_device, &device_create_info, nullptr, &device->device_);]=])
 set(hook [=[
+  if (wrathfall::vulkan_live::TemporalRequested()) {
+    enabled_features.shaderStorageImageExtendedFormats = supported_features.shaderStorageImageExtendedFormats;
+  }
   const auto native_features12 = features_1_2.enabled;
   const auto native_features13 = features_1_3.enabled;
   const auto native_extension_count = device_create_info.enabledExtensionCount;
@@ -135,12 +138,54 @@ set(hook [=[
         normalized_depth_control.stencil_enable, camera, viewport_info.z_min, viewport_info.z_max,
         static_cast<u32>(color.color_format), surface.surface_pitch,
         1u << static_cast<unsigned>(surface.msaa_samples))) {
-      wrathfall::vulkan_live::CopyInterlockInput(*this, render_target_cache_->GetEDRAMBuffer(),
-                                                false);
+      wrathfall::vulkan_live::CopyInterlockInput(*this, frame_current_,
+                                                render_target_cache_->GetEDRAMBuffer(), false);
+    }
+    if (!host_render_targets_used && normalized_depth_control.z_enable && color.color_base != 720 &&
+        regs.Get<xenos::reg::RB_DEPTH_INFO>().depth_base == 0 &&
+        viewport_info.xy_extent[0] == 1280 && viewport_info.xy_extent[1] == 720) {
+      const auto jitter = wrathfall::vulkan_live::Jitter(frame_current_);
+      viewport_info.ndc_offset[0] += jitter[0] * (2.0f / 1280.0f);
+      viewport_info.ndc_offset[1] += jitter[1] * (2.0f / 720.0f);
     }
   }
 
   UpdateDynamicState(viewport_info, primitive_polygonal, normalized_depth_control);]=])
+replace_hook(command_processor "${anchor}" "${hook}")
+
+set(anchor [=[  presenter->RefreshGuestOutput(
+      guest_output_width, guest_output_height, display_width, display_height,]=])
+set(hook [=[
+  const bool temporal_frontbuffer = frontbuffer_format == xenos::TextureFormat::k_8_8_8_8;
+  if (wrathfall::vulkan_live::CanPresentTemporal(frame_current_,
+        temporal_frontbuffer ? guest_output_width : 0, guest_output_height)) {
+    const bool swap_red_blue = swap_source_needs_rb_swap &&
+        !GetVulkanDevice()->GetProperties().imageViewFormatSwizzle;
+    if (presenter->RefreshGuestOutput(2560, 1440, display_width, display_height,
+          [&](gpu::Presenter::GuestOutputRefreshContext& context) -> bool {
+            if (!BeginSubmission(true)) return false;
+            auto& output = static_cast<gpu::vulkan::VulkanPresenter::VulkanGuestOutputRefreshContext&>(context);
+            const auto* lut = GetGammaRamp256EntryTable();
+            std::array<uint32_t, 256> gamma{};
+            for (size_t i = 0; i < gamma.size(); ++i) {
+              gamma[i] = uint32_t(lut[i].color_10_red) |
+                  (uint32_t(lut[i].color_10_green) << 10) | (uint32_t(lut[i].color_10_blue) << 20);
+            }
+            if (!wrathfall::vulkan_live::ScheduleTemporal(frame_current_, output.GetImage(),
+                    output.GetImageView(), output.HasImageBeenWritten(), swap_texture_view,
+                    frontbuffer_width_scaled, frontbuffer_height_scaled, swap_red_blue, gamma)) return false;
+            context.SetIs8bpc(false);
+            return EndSubmission(true);
+          })) return;
+  }
+
+  presenter->RefreshGuestOutput(
+      guest_output_width, guest_output_height, display_width, display_height,]=])
+replace_hook(command_processor "${anchor}" "${hook}")
+
+set(anchor [=[    deferred_command_buffer_.Execute(command_buffer.buffer);]=])
+set(hook [=[    deferred_command_buffer_.Execute(command_buffer.buffer);
+    wrathfall::vulkan_live::RecordTemporal(command_buffer.buffer);]=])
 replace_hook(command_processor "${anchor}" "${hook}")
 
 set(anchor [=[  bool swap_source_scaled = frontbuffer_width_unscaled && frontbuffer_height_unscaled &&]=])
@@ -166,8 +211,18 @@ set(hook [=[
         GetPath() == Path::kPixelShaderInterlock, image,
         1u << static_cast<unsigned>(layout.msaa_samples), layout.format, layout.pitch_tiles,
         layout.base_tiles, resolve_info.copy_dest_extent_length)) {
-      wrathfall::vulkan_live::CopyInterlockInput(command_processor_, edram_buffer_, true);
+      wrathfall::vulkan_live::CopyInterlockInput(command_processor_, command_processor_.GetCurrentFrame(),
+                                                edram_buffer_, true);
     }
+  }
+  if (wrathfall::vulkan_live::TemporalRequested() && !draw_resolution_scaled &&
+      GetPath() == Path::kPixelShaderInterlock && !resolve_info.IsCopyingDepth() &&
+      resolve_info.copy_dest_base == 0x1f5f8000 && resolve_info.color_original_base == 720 &&
+      resolve_info.coordinate_info.width_div_8 == 160 && resolve_info.height_div_8 == 90 &&
+      resolve_info.copy_dest_extent_length &&
+      wrathfall::vulkan_live::NeedsColorBeforeResolve(command_processor_.GetCurrentFrame())) {
+    wrathfall::vulkan_live::CopyInterlockInput(command_processor_, command_processor_.GetCurrentFrame(),
+                                              edram_buffer_, false);
   }
 
   bool copied = false;

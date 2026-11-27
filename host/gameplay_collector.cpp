@@ -13,6 +13,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -20,6 +21,7 @@
 #include <exception>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -50,6 +52,7 @@ struct Frame {
   uint32_t height = 0;
   int64_t time = 0;
   std::vector<uint32_t> pixels;
+  unsigned segment = 0;
 };
 
 using Snapshot = std::shared_ptr<const Frame>;
@@ -69,6 +72,143 @@ struct Findings {
   unsigned green_percent = 0;
   bool green_tint = false;
   bool dark_square = false;
+  bool blur = false;
+  bool ghosting = false;
+  double sharpness = 0;
+  unsigned edge_samples = 0;
+  unsigned ghost_tiles = 0;
+};
+
+int Luma(uint32_t pixel) {
+  return int((77 * ((pixel >> 16) & 255) + 150 * ((pixel >> 8) & 255) +
+              29 * (pixel & 255) + 128) >> 8);
+}
+
+struct MotionImage {
+  static constexpr int kWidth = 320, kHeight = 180;
+  std::vector<uint8_t> luma;
+  int64_t time = 0;
+  unsigned segment = 0;
+  uint32_t width = 0, height = 0;
+
+  explicit MotionImage(const Frame& frame)
+      : luma(kWidth * kHeight), time(frame.time), segment(frame.segment),
+        width(frame.width), height(frame.height) {
+    for (int y = 0; y < kHeight; ++y) {
+      const auto row = (2 * y + 1) * height / (2 * kHeight) * width;
+      for (int x = 0; x < kWidth; ++x) {
+        luma[y * kWidth + x] = uint8_t(Luma(frame.pixels[row + (2 * x + 1) * width / (2 * kWidth)]));
+      }
+    }
+  }
+
+  int At(int x, int y) const { return luma[y * kWidth + x]; }
+};
+
+void InspectSharpness(const Frame& frame, Findings& info) {
+  if (frame.width < 32 || frame.height < 32) return;
+  const auto sample = [&](uint32_t x, uint32_t y) { return Luma(frame.pixels[y * frame.width + x]); };
+  const auto stride = std::max(2u, frame.width / 560);
+  uint64_t fine = 0, broad = 0;
+  for (uint32_t y = std::max(4u, frame.height / 9); y < frame.height * 8 / 9; y += stride) {
+    for (uint32_t x = std::max(4u, frame.width / 9); x < frame.width * 8 / 9; x += stride) {
+      const int wide_x = sample(x + 3, y) - sample(x - 3, y);
+      const int wide_y = sample(x, y + 3) - sample(x, y - 3);
+      if (std::max(std::abs(wide_x), std::abs(wide_y)) < 20) continue;
+      ++info.edge_samples;
+      const int near_x = sample(x + 1, y) - sample(x - 1, y);
+      const int near_y = sample(x, y + 1) - sample(x, y - 1);
+      fine += near_x * near_x + near_y * near_y;
+      broad += wide_x * wide_x + wide_y * wide_y;
+    }
+  }
+  if (broad) info.sharpness = double(fine) / double(broad);
+}
+
+bool HasFadingTrail(const MotionImage& current, const MotionImage& previous, int x, int y) {
+  // Fit translation first, then look for a fainter copy at the feature's former position.
+  const auto cost = [&](int dx, int dy) {
+    int sum = 0;
+    for (int j = -10; j <= 10; j += 4) for (int i = -10; i <= 10; i += 4) {
+      const int error = current.At(x + i, y + j) - previous.At(x + i + dx, y + j + dy);
+      sum += std::abs(error);
+    }
+    return sum;
+  };
+  const int stationary = cost(0, 0);
+  if (stationary < 36 * 9) return false;
+  int best = stationary, best_x = 0, best_y = 0;
+  for (int dy = -12; dy <= 12; dy += 3) for (int dx = -12; dx <= 12; dx += 3) {
+    const int error = cost(dx, dy);
+    if (error < best) { best = error; best_x = dx; best_y = dy; }
+  }
+  const int coarse_x = best_x, coarse_y = best_y;
+  for (int dy = coarse_y - 1; dy <= coarse_y + 1; ++dy) {
+    for (int dx = coarse_x - 1; dx <= coarse_x + 1; ++dx) {
+      const int error = cost(dx, dy);
+      if (error < best) { best = error; best_x = dx; best_y = dy; }
+    }
+  }
+  if (best * 4 > stationary * 3 || std::max(std::abs(best_x), std::abs(best_y)) < 3) return false;
+  int original = 0, secondary = 0, overlap = 0;
+  for (int j = -10; j <= 10; j += 4) for (int i = -10; i <= 10; i += 4) {
+    const int local_x = x + i, local_y = y + j;
+    const int moving = previous.At(local_x + best_x, local_y + best_y);
+    const int trail = previous.At(local_x, local_y) - moving;
+    const int error = current.At(local_x, local_y) - moving;
+    original += error * error;
+    secondary += trail * trail;
+    overlap += error * trail;
+  }
+  if (secondary < 36 * 14 * 14 || original < 36 * 4 * 4) return false;
+  const double alpha = double(overlap) / secondary;
+  const double remaining = original - double(overlap) * overlap / secondary;
+  return alpha >= 0.12 && alpha <= 0.48 && remaining <= original * 0.48 &&
+         remaining <= 36 * 12 * 12;
+}
+
+class QualityHistory {
+ public:
+  void InspectFrame(const Frame& frame, Findings& info) {
+    InspectSharpness(frame, info);
+    MotionImage current(frame);
+    const bool continuous = previous_ && current.segment == previous_->segment &&
+        current.width == previous_->width && current.height == previous_->height &&
+        current.time > previous_->time && current.time - previous_->time <= 360;
+    unsigned difference = 0;
+    if (continuous) {
+      for (size_t i = 0; i < current.luma.size(); i += 8) {
+        difference += std::abs(int(current.luma[i]) - int(previous_->luma[i]));
+      }
+    }
+    const bool same_scene = continuous && difference < current.luma.size() / 8 * 27;
+    if (!same_scene) sharpness_.clear();
+    if (info.edge_samples >= 120) {
+      double reference = 0;
+      if (!sharpness_.empty()) {
+        std::vector<double> baseline(sharpness_.begin(), sharpness_.end());
+        std::nth_element(baseline.begin(), baseline.begin() + baseline.size() / 2, baseline.end());
+        reference = baseline[baseline.size() / 2];
+      }
+      info.blur = same_scene && (info.sharpness < 0.17 ||
+          (reference > 0.22 && info.sharpness < 0.27 && info.sharpness < 0.73 * reference));
+      if (!info.blur) {
+        sharpness_.push_back(info.sharpness);
+        if (sharpness_.size() > 12) sharpness_.pop_front();
+      }
+    }
+    if (same_scene && difference >= current.luma.size() / 8) {
+      for (int y = 35; y <= 143; y += 18) for (int x = 40; x <= 280; x += 24) {
+        info.ghost_tiles += HasFadingTrail(current, *previous_, x, y);
+      }
+      info.ghosting = info.ghost_tiles >= 2;
+    }
+    previous_ = std::move(current);
+  }
+
+ private:
+  std::optional<MotionImage> previous_;
+  std::deque<double> sharpness_;
 };
 
 Findings Inspect(const Frame& frame) {
@@ -208,21 +348,21 @@ class WindowCapture {
         Snapshot image;
         if (requested || stamp >= next_image) {
           next_image = stamp + 2000000;  // 200 ms. Keep expensive pixel readbacks at about 5 Hz.
-          image = ReadImage(captured, size, unix_ms);
+          image = ReadImage(captured, size, unix_ms, segment);
         }
         std::lock_guard lock(mutex_);
         if (active) batch_.ticks.push_back({stamp, unix_ms, segment});
         if (batch_.ticks.size() > 1024) batch_.ticks.pop_front();
         if (image) {
           batch_.images.push_back(std::move(image));
-          if (batch_.images.size() > 10) batch_.images.pop_front();
+          if (batch_.images.size() > 3) batch_.images.pop_front();
         }
       }
     }
   }
 
   Snapshot ReadImage(const capture::Direct3D11CaptureFrame& captured,
-                     winrt::Windows::Graphics::SizeInt32 size, int64_t unix_ms) {
+                     winrt::Windows::Graphics::SizeInt32 size, int64_t unix_ms, unsigned segment) {
     auto access = captured.Surface().as<
         ::Windows::Graphics::DirectX::Direct3D11::IDirect3DDxgiInterfaceAccess>();
     winrt::com_ptr<ID3D11Texture2D> source;
@@ -237,10 +377,10 @@ class WindowCapture {
       winrt::check_hresult(device_->CreateTexture2D(&desc, nullptr, staging_.put()));
     }
     auto frame = std::make_shared<Frame>();
-    const double scale = std::min({1.0, 960.0 / size.Width, 540.0 / size.Height});
-    frame->width = std::max(2u, static_cast<uint32_t>(size.Width * scale));
-    frame->height = std::max(2u, static_cast<uint32_t>(size.Height * scale));
+    frame->width = static_cast<uint32_t>(size.Width);
+    frame->height = static_cast<uint32_t>(size.Height);
     frame->time = unix_ms;
+    frame->segment = segment;
     frame->pixels.resize(frame->width * frame->height);
 
     context_->CopyResource(staging_.get(), source.get());
@@ -248,10 +388,9 @@ class WindowCapture {
     winrt::check_hresult(context_->Map(staging_.get(), 0, D3D11_MAP_READ, 0, &mapped));
     for (uint32_t y = 0; y < frame->height; ++y) {
       const auto* row = reinterpret_cast<const uint32_t*>(
-          static_cast<const uint8_t*>(mapped.pData) + y * size.Height / frame->height * mapped.RowPitch);
-      for (uint32_t x = 0; x < frame->width; ++x) {
-        frame->pixels[y * frame->width + x] = row[x * size.Width / frame->width] | 0xFF000000;
-      }
+          static_cast<const uint8_t*>(mapped.pData) + size_t(y) * mapped.RowPitch);
+      std::transform(row, row + frame->width, frame->pixels.begin() + size_t(y) * frame->width,
+                     [](uint32_t pixel) { return pixel | 0xFF000000; });
     }
     context_->Unmap(staging_.get(), 0);
     return frame;
@@ -458,7 +597,12 @@ void SaveMark(IWICImagingFactory& factory, const fs::path& project, const fs::pa
   info << "event=" << mark.reason << "\nmark_unix_ms=" << mark.time << "\npid=" << pid
        << "\ngame_exit_code=" << mark.exit_code << "\ngreen_percent=" << mark.findings.green_percent
        << "\ngreen_tint_candidate=" << mark.findings.green_tint
-       << "\ndark_square_candidate=" << mark.findings.dark_square << "\n";
+       << "\ndark_square_candidate=" << mark.findings.dark_square
+       << "\nblur_candidate=" << mark.findings.blur
+       << "\nghosting_candidate=" << mark.findings.ghosting
+       << "\nsharpness_ratio=" << mark.findings.sharpness
+       << "\nedge_samples=" << mark.findings.edge_samples
+       << "\nghost_trail_tiles=" << mark.findings.ghost_tiles << "\n";
   if (!mark.timings.empty()) {
     info << "frame_timing_source=windows_graphics_capture_compositor\n";
     std::ofstream timings(output / "frame-times.csv");
@@ -475,12 +619,13 @@ void SaveMark(IWICImagingFactory& factory, const fs::path& project, const fs::pa
   fs::copy_file(project / "out" / "launcher-settings.json", output / "launcher-settings.json", error);
   CopyLogTail(project, output);
   std::ofstream timeline(output / "frames.csv");
-  timeline << "image,unix_ms,relative_to_mark_ms\n";
+  timeline << "image,unix_ms,relative_to_mark_ms,width,height\n";
   for (size_t i = 0; i < mark.frames.size(); ++i) {
     const auto name = std::to_string(1000 + i).substr(1) + ".png";
     const Frame& frame = *mark.frames[i];
     SavePng(factory, output / name, frame);
-    timeline << name << ',' << frame.time << ',' << frame.time - mark.time << '\n';
+    timeline << name << ',' << frame.time << ',' << frame.time - mark.time << ','
+             << frame.width << ',' << frame.height << '\n';
   }
   std::wprintf(L"Saved %ls\n", output.c_str());
   std::fflush(stdout);
@@ -600,7 +745,9 @@ class FallbackMonitor {
          << "\nadditional_causes_in_renderer_log=" << incident.extra_causes << '\n';
     if (incident.screenshot) {
       info << "screenshot=screenshot.png\nscreenshot_unix_ms=" << incident.screenshot->time
-           << "\nscreenshot_offset_ms=" << incident.screenshot->time - first.time << '\n';
+           << "\nscreenshot_offset_ms=" << incident.screenshot->time - first.time
+           << "\nscreenshot_width=" << incident.screenshot->width
+           << "\nscreenshot_height=" << incident.screenshot->height << '\n';
     } else {
       info << "screenshot=unavailable\n";
     }
@@ -624,11 +771,25 @@ class FallbackMonitor {
   std::deque<FallbackIncident> ended_;
 };
 
-void Collect(const fs::path& project, DWORD pid, HWND window, HANDLE process, bool temporal) {
+struct Graphics {
+  std::string renderer = "unknown";
+  std::string upscaler = "unknown";
+};
+
+void Collect(const fs::path& project, DWORD pid, HWND window, HANDLE process, bool temporal,
+             const Graphics& graphics) {
   WindowCapture recorder(window);
   MarkKey hotkey(window);
   auto factory = winrt::create_instance<IWICImagingFactory>(CLSID_WICImagingFactory);
   const auto session = project / "out" / "diagnostics" / std::to_string(EpochMilliseconds());
+  fs::create_directories(session);
+  {
+    std::ofstream info(session / "session.txt");
+    info << "renderer=" << graphics.renderer << "\nupscaler=" << graphics.upscaler
+         << "\npid=" << pid << "\nsource=windows_graphics_capture_game_window\n";
+  }
+  std::ofstream quality_log(session / "frame-quality.csv");
+  quality_log << "unix_ms,width,height,segment,sharpness_ratio,edge_samples,ghost_trail_tiles,blur_candidate,ghosting_candidate\n";
   std::wprintf(L"Press L in the game to mark an anomaly. Reports go to\n%ls\n", session.c_str());
   std::fflush(stdout);
   std::deque<Snapshot> ring;
@@ -636,13 +797,17 @@ void Collect(const fs::path& project, DWORD pid, HWND window, HANDLE process, bo
                                      : fs::path{});
   auto next_fallback_read = Clock::now();
   FramePacing pacing;
+  QualityHistory quality;
   std::vector<Mark> marks;
   uint32_t written = 0;
   unsigned automatic = 0;
   unsigned automatic_timing = 0;
   unsigned suspect_streak = 0;
+  unsigned blur_streak = 0, ghost_streak = 0;
+  unsigned blur_reports = 0, ghost_reports = 0;
   Findings last{};
   auto next_visual = Clock::now();
+  auto next_blur = next_visual, next_ghost = next_visual;
   auto next_stutter = next_visual;
   auto next_drop = next_visual;
   const auto mark = [&](const char* reason, int64_t time, DWORD code = 0, PacingIssue issue = {}) {
@@ -655,15 +820,34 @@ void Collect(const fs::path& project, DWORD pid, HWND window, HANDLE process, bo
     auto batch = recorder.Take();
     for (const auto& frame : batch.images) {
       last = Inspect(*frame);
-      for (auto& pending : marks) pending.frames.push_back(frame);
+      quality.InspectFrame(*frame, last);
+      quality_log << frame->time << ',' << frame->width << ',' << frame->height << ',' << frame->segment
+                  << ',' << last.sharpness << ',' << last.edge_samples << ',' << last.ghost_tiles
+                  << ',' << last.blur << ',' << last.ghosting << '\n';
+      for (auto& pending : marks) {
+        if (pending.frames.size() < 7) pending.frames.push_back(frame);
+        else pending.frames.back() = frame;
+      }
       ring.push_back(frame);
-      if (ring.size() > 10) ring.pop_front();
+      if (ring.size() > 4) ring.pop_front();
       const bool suspect = last.green_tint || last.dark_square;
       suspect_streak = suspect ? suspect_streak + 1 : 0;
       if (active && suspect_streak >= 2 && now >= next_visual && automatic < 12) {
         mark(last.green_tint ? "possible-green-tint" : "possible-dark-square", frame->time);
         ++automatic;
         next_visual = now + 25s;
+      }
+      blur_streak = last.blur ? blur_streak + 1 : 0;
+      ghost_streak = last.ghosting ? ghost_streak + 1 : 0;
+      if (active && blur_streak >= 2 && now >= next_blur && blur_reports < 8) {
+        mark("possible-blur", frame->time);
+        ++blur_reports;
+        next_blur = now + 25s;
+      }
+      if (active && ghost_streak >= 2 && now >= next_ghost && ghost_reports < 8) {
+        mark("possible-ghosting", frame->time);
+        ++ghost_reports;
+        next_ghost = now + 25s;
       }
     }
     for (const auto tick : batch.ticks) {
@@ -680,7 +864,7 @@ void Collect(const fs::path& project, DWORD pid, HWND window, HANDLE process, bo
         next = now + 15s;
       }
     }
-    if (!active) suspect_streak = 0;
+    if (!active) suspect_streak = blur_streak = ghost_streak = 0;
   };
   while (WaitForSingleObject(process, 0) == WAIT_TIMEOUT && IsWindow(window)) {
     const auto now = Clock::now();
@@ -690,7 +874,10 @@ void Collect(const fs::path& project, DWORD pid, HWND window, HANDLE process, bo
       if (!IsWindow(window) || WaitForSingleObject(process, 250) == WAIT_OBJECT_0) break;
       throw;
     }
-    if (hotkey.TakeMark()) mark("manual", EpochMilliseconds());
+    if (hotkey.TakeMark()) {
+      mark("manual", EpochMilliseconds());
+      recorder.RequestSnapshot();
+    }
     if (now >= next_fallback_read) {
       if (fallbacks.Read()) recorder.RequestSnapshot();
       fallbacks.Publish(*factory, project, session, ring, written, pid, false);
@@ -774,8 +961,69 @@ void SelfTest(const fs::path& output) {
   }
   std::fill(frame.pixels.begin(), frame.pixels.end(), 0xFF205F20);
   if (Inspect(frame).green_percent != 100) throw std::runtime_error("Green tint was missed.");
+
+  const auto gray = [](uint32_t value) { return 0xFF000000u | value * 0x010101u; };
+  Frame detailed{2560, 1440, 1000, std::vector<uint32_t>(2560 * 1440)};
+  Frame blurred = detailed;
+  blurred.time += 200;
+  const auto stripes = [](int x) { return (std::max(0, x) / 56) % 2 ? 220u : 36u; };
+  for (int x = 0; x < static_cast<int>(detailed.width); ++x) {
+    unsigned softened = 0;
+    for (int dx = -9; dx <= 9; ++dx) softened += stripes(x + dx);
+    for (uint32_t y = 0; y < detailed.height; ++y) {
+      detailed.pixels[y * detailed.width + x] = gray(stripes(x));
+      blurred.pixels[y * detailed.width + x] = gray(softened / 19);
+    }
+  }
+  QualityHistory blur_check;
+  Findings sharp_score{}, blurred_score{};
+  blur_check.InspectFrame(detailed, sharp_score);
+  blur_check.InspectFrame(blurred, blurred_score);
+  if (sharp_score.blur || sharp_score.ghosting || !blurred_score.blur ||
+      sharp_score.sharpness <= blurred_score.sharpness) throw std::runtime_error("Blur detection did not verify.");
+
+  Frame before{320, 180, 1000, std::vector<uint32_t>(320 * 180)};
+  for (int y = 0; y < int(before.height); ++y) for (int x = 0; x < int(before.width); ++x) {
+    const unsigned value = (x >= 48 && x < 272 && y >= 42 && y < 140) ?
+        44 + ((x / 5 * 19 + y / 5 * 67 + (x / 5 * y / 5) * 13) % 171) : 73;
+    before.pixels[y * before.width + x] = gray(value);
+  }
+  Frame moving = before, trailed = before;
+  moving.time = trailed.time = before.time + 200;
+  for (int y = 0; y < int(before.height); ++y) for (int x = 0; x < int(before.width); ++x) {
+    const auto previous = Luma(before.pixels[y * before.width + x]);
+    const auto translated = Luma(before.pixels[y * before.width + std::max(0, x - 9)]);
+    moving.pixels[y * before.width + x] = gray(translated);
+    trailed.pixels[y * before.width + x] = gray((3 * translated + previous) / 4);
+  }
+  QualityHistory motion_check, trail_check;
+  Findings prior_motion{}, prior_trail{}, clear_motion{}, visible_trail{};
+  motion_check.InspectFrame(before, prior_motion);
+  motion_check.InspectFrame(moving, clear_motion);
+  trail_check.InspectFrame(before, prior_trail);
+  trail_check.InspectFrame(trailed, visible_trail);
+  if (clear_motion.ghosting || !visible_trail.ghosting)
+    throw std::runtime_error("Motion and ghosting were not distinguished.");
+  QualityHistory focus_check;
+  Findings focus_prior{}, focus_after{};
+  focus_check.InspectFrame(before, focus_prior);
+  trailed.segment++;
+  focus_check.InspectFrame(trailed, focus_after);
+  if (focus_after.ghosting || focus_after.blur) throw std::runtime_error("A focus gap was flagged as a visual issue.");
+
   fs::create_directories(output);
   auto factory = winrt::create_instance<IWICImagingFactory>(CLSID_WICImagingFactory);
+  const auto full_image = output / "full-resolution.png";
+  SavePng(*factory, full_image, detailed);
+  winrt::com_ptr<IWICBitmapDecoder> decoder;
+  winrt::com_ptr<IWICBitmapFrameDecode> decoded;
+  winrt::check_hresult(factory->CreateDecoderFromFilename(full_image.c_str(), nullptr, GENERIC_READ,
+      WICDecodeMetadataCacheOnDemand, decoder.put()));
+  winrt::check_hresult(decoder->GetFrame(0, decoded.put()));
+  UINT decoded_width = 0, decoded_height = 0;
+  winrt::check_hresult(decoded->GetSize(&decoded_width, &decoded_height));
+  if (decoded_width != detailed.width || decoded_height != detailed.height)
+    throw std::runtime_error("The comparison screenshot was resized.");
   Mark test{"self-test", frame.time, 0, Clock::now(), Inspect(frame),
             {std::make_shared<Frame>(std::move(frame))}, {{frame.time, 75.0}}, hitch};
   SaveMark(*factory, output, output, test, 1, 0);
@@ -833,7 +1081,7 @@ void SelfTest(const fs::path& output) {
       read_file(second_report / "upscaler-details.tsv").find("device lost") == std::string::npos) {
     throw std::runtime_error("Fallback grouping, details, or screenshot writing did not verify.");
   }
-  std::puts("PASS collector visual analysis, frame pacing, and DLSS/FSR fallback reports.");
+  std::puts("PASS blur, ghosting, 2560x1440 PNG, frame pacing, and DLSS/FSR fallback reports.");
 }
 
 }  // namespace
@@ -845,7 +1093,17 @@ int wmain(int argc, wchar_t** argv) {
       SelfTest(argv[2]);
       return 0;
     }
-    if (argc != 4) throw std::runtime_error("Open the game and run Collect-Gameplay.cmd.");
+    if (argc != 4 && argc != 6) throw std::runtime_error("Open the game and run Collect-Gameplay.cmd.");
+    Graphics graphics;
+    if (argc == 6) {
+      const std::wstring_view renderer(argv[4]), provider(argv[5]);
+      if (renderer != L"vulkan" && renderer != L"d3d12")
+        throw std::invalid_argument("Unrecognized renderer for the collector.");
+      if (provider != L"native" && provider != L"dlss" && provider != L"fsr3")
+        throw std::invalid_argument("Unrecognized upscaler for the collector.");
+      graphics.renderer.assign(renderer.begin(), renderer.end());
+      graphics.upscaler.assign(provider.begin(), provider.end());
+    }
     const fs::path project = argv[1];
     const DWORD pid = std::stoul(argv[2]);
     const auto window = reinterpret_cast<HWND>(static_cast<uintptr_t>(std::stoull(argv[3])));
@@ -859,6 +1117,8 @@ int wmain(int argc, wchar_t** argv) {
     std::error_code identity_error;
     const auto out = project / "out";
     const bool temporal = fs::equivalent(executable, out / "dlss-runtime" / "game" / "asuras_wrath.exe",
+                                         identity_error) ||
+                          fs::equivalent(executable, out / "vulkan-upscalers" / "game" / "asuras_wrath.exe",
                                          identity_error);
     if (!temporal && !fs::equivalent(executable, out / "build" / "win-amd64" / "Release" /
                                     "asuras_wrath.exe", identity_error)) {
@@ -872,7 +1132,7 @@ int wmain(int argc, wchar_t** argv) {
     if (mutex_error == ERROR_ALREADY_EXISTS) {
       throw std::runtime_error("The gameplay collector is already running for this session.");
     }
-    Collect(project, pid, window, process.get(), temporal);
+    Collect(project, pid, window, process.get(), temporal, graphics);
     return 0;
   } catch (const winrt::hresult_error& error) {
     std::fwprintf(stderr, L"Collector error %ls\n", error.message().c_str());

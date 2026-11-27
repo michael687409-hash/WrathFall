@@ -6,7 +6,7 @@ Windows x64 static recompilation of title `43430817`, media ID `11DFADD6`, using
 
 This repository contains source. Install Visual Studio 2022 Build Tools with the Desktop development with C++ workload, x64 tools, a Windows SDK, and the CMake tools. Place the Windows x64 ReXGlue 0.11.0 package at `.tools/rexglue-0.11.0/win-amd64/`, matching SDK sources at `.tools/rexglue-sdk-0.11.0/`, and LLVM 20.1.8 at `.tools/llvm-20.1.8/`. Run `.\host\launcher\Build-Launcher.ps1` to create `WrathFall.exe`.
 
-For optional Direct3D 12 upscaling, see [renderer build instructions](host/renderer_trace/README.md). Vulkan runs the game at its native internal resolution. Vulkan DLSS and FSR 3 are under development.
+For optional Direct3D 12 upscaling, see [renderer build instructions](host/renderer_trace/README.md). [Experimental Vulkan upscaling](host/renderer_trace/vulkan/README.md) adds DLSS and FSR 3 at 2560 × 1440 with a fixed 720p input. This mode requires a locally built Vulkan driver and is awaiting gameplay validation.
 
 ## Open the launcher
 
@@ -35,6 +35,8 @@ Cache coverage grows as the renderer encounters new draws. Full precompilation r
 ## Record a gameplay issue
 
 The **Gameplay collector** checkbox next to **Play** controls whether capture starts with the game. It starts checked and remembers your choice. When it’s on, the launcher shows **Collector active (L to mark)** once capture is ready. Press **L** in the game to record an issue. The collector saves nearby game-window frames and recent game logs locally under `out/diagnostics/`. Collector activity is logged under `out/logs/gameplay-collector-*.log`. The collector closes after the game exits, including when the game crashes.
+
+The collector flags **possible blur** and **possible ghosting** using sampled image analysis. Reports save lossless PNGs at the captured game window’s resolution. Each session has `session.txt` for the selected renderer and upscaler and `frame-quality.csv` for measurements. Match the scene, output resolution, and display mode when comparing providers. Press **L** to mark matching moments.
 
 The collector also saves **possible-frame-stutter** and **possible-fps-drop** reports automatically. It compares the game window’s compositor frame timestamps with its recent cadence while the game is in focus. Open `frame-times.csv` for the intervals before and after the mark. The timing is for the frames Windows captures from the game window. Loading transitions and changes in a cutscene’s intended frame rate can also produce reports.
 

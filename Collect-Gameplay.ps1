@@ -3,7 +3,8 @@ $bin = Join-Path $PSScriptRoot 'out\build\win-amd64\Release'
 $collector = Join-Path $bin 'asura_gameplay_collector.exe'
 $gamePaths = @(
     (Join-Path $bin 'asuras_wrath.exe'),
-    (Join-Path $PSScriptRoot 'out\dlss-runtime\game\asuras_wrath.exe')
+    (Join-Path $PSScriptRoot 'out\dlss-runtime\game\asuras_wrath.exe'),
+    (Join-Path $PSScriptRoot 'out\vulkan-upscalers\game\asuras_wrath.exe')
 )
 if (!(Test-Path -LiteralPath $collector -PathType Leaf)) {
     Write-Error 'Use Build PC version in the launcher first.'

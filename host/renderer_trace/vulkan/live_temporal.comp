@@ -1,0 +1,160 @@
+#version 450
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(std430, binding = 0) readonly buffer GuestPixels { uint edram[]; };
+layout(binding = 1, rgba16f) uniform image2D scene;
+layout(binding = 2, r32f) uniform image2D depth;
+layout(binding = 3, rg32f) uniform image2D motion;
+layout(binding = 4, rgba16f) uniform image2D previousScene;
+layout(binding = 5) uniform sampler2D upscaledScene;
+layout(binding = 6) uniform sampler2D completedGuest;
+layout(binding = 7, rgb10_a2) uniform writeonly image2D presentation;
+layout(binding = 8, r32f) uniform image2D reactive;
+layout(std430, binding = 9) buffer FrameStatistics {
+    uint sceneSamples;
+    uint overlaySamples;
+    uint fallbackSamples;
+    uint motionSamples;
+    uint gammaRamp[256];
+} stats;
+layout(push_constant) uniform Frame {
+    mat4 currentToPrevious;
+    vec2 jitter;
+    vec2 previousJitter;
+    ivec2 guestAllocation;
+    uint flags;
+} frame;
+
+const ivec2 renderSize = ivec2(1280, 720);
+const uint planeWords = 1280u * 720u;
+const uint resetHistory = 1u;
+const uint swapGuestRedBlue = 2u;
+const uint useUpscaled = 4u;
+
+uint tileAddress(uvec2 p, bool isDepth) {
+    uint tile = p.y / 16u * 16u + p.x / 80u;
+    uint column = p.x % 80u;
+    if (isDepth) column = (column + 40u) % 80u;
+    return tile * 1280u + p.y % 16u * 80u + column;
+}
+
+float guestDepth(uint packedDepth) {
+    uint bits = packedDepth >> 8u;
+    uint exponent = bits >> 20u;
+    float mantissa = float(bits & 0xfffffu) / 1048576.0;
+    float value = exponent != 0u ? (1.0 + mantissa) * exp2(float(exponent) - 15.0)
+                                 : mantissa * exp2(-14.0);
+    return clamp(value, 0.0, 1.0);
+}
+
+#if defined(UNPACK)
+void main() {
+    uvec2 p = gl_GlobalInvocationID.xy;
+    if (any(greaterThanEqual(p, uvec2(renderSize)))) return;
+    vec4 rgba = unpackUnorm4x8(edram[planeWords + tileAddress(p, false)]);
+    imageStore(scene, ivec2(p), rgba);
+    imageStore(depth, ivec2(p), vec4(guestDepth(edram[tileAddress(p, true)])));
+}
+#endif
+
+#if defined(MOTION)
+vec3 colorAt(ivec2 p, bool old) {
+    p = clamp(p, ivec2(0), renderSize - 1);
+    return old ? imageLoad(previousScene, p).rgb : imageLoad(scene, p).rgb;
+}
+
+float patchCost(ivec2 p, ivec2 candidate) {
+    const ivec2 offsets[] = ivec2[5](ivec2(0), ivec2(-2, -1), ivec2(2, -1),
+                                    ivec2(-1, 2), ivec2(1, 2));
+    float result = 0.0;
+    for (int i = 0; i < offsets.length(); ++i) {
+        vec3 difference = abs(colorAt(p + offsets[i], false) - colorAt(candidate + offsets[i], true));
+        result += dot(difference, vec3(0.25, 0.50, 0.25));
+    }
+    return result;
+}
+
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy) * 2 + 1;
+    if (any(greaterThanEqual(p, renderSize))) return;
+    vec2 velocity = vec2(0);
+    float mask = 0.0;
+    if ((frame.flags & resetHistory) == 0u) {
+        vec2 ndcScale = vec2(2.0, -2.0) / vec2(renderSize);
+        vec2 ndc = (vec2(p) + 0.5 - frame.jitter) * ndcScale + vec2(-1.0, 1.0);
+        vec4 oldClip = frame.currentToPrevious * vec4(ndc, imageLoad(depth, p).r, 1.0);
+        vec2 estimate = vec2(p) + frame.previousJitter - frame.jitter;
+        if (oldClip.w > 0.00001) {
+            estimate += clamp((oldClip.xy / oldClip.w - ndc) / ndcScale, vec2(-64), vec2(64));
+        }
+        ivec2 center = clamp(ivec2(round(estimate)), ivec2(0), renderSize - 1);
+        ivec2 best = center;
+        float cost = patchCost(p, best);
+        if (cost > 0.025) {
+            for (int y = -2; y <= 2; ++y) for (int x = -2; x <= 2; ++x) {
+                ivec2 test = clamp(center + 4 * ivec2(x, y), ivec2(0), renderSize - 1);
+                float score = patchCost(p, test) + 0.005 * float(abs(x) + abs(y));
+                if (score < cost) { cost = score; best = test; }
+            }
+            center = best;
+            for (int y = -1; y <= 1; ++y) for (int x = -1; x <= 1; ++x) {
+                ivec2 test = clamp(center + ivec2(x, y), ivec2(0), renderSize - 1);
+                float score = patchCost(p, test) + 0.002 * float(abs(x) + abs(y));
+                if (score < cost) { cost = score; best = test; }
+            }
+        }
+        velocity = vec2(best - p) - (frame.previousJitter - frame.jitter);
+        mask = smoothstep(0.13, 0.70, cost);
+    }
+    if (all(equal(p & 7, ivec2(1))) && dot(velocity, velocity) >= 1.0)
+        atomicAdd(stats.motionSamples, 1u);
+    for (int y = 0; y < 2; ++y) for (int x = 0; x < 2; ++x) {
+        ivec2 pixel = p - ivec2(x, y);
+        imageStore(motion, pixel, vec4(velocity, 0, 0));
+        imageStore(reactive, pixel, vec4(mask));
+    }
+}
+#endif
+
+#if defined(COMPOSE)
+float applyGamma(float value, uint shift) {
+    float position = clamp(value, 0.0, 1.0) * 255.0;
+    uint first = uint(position);
+    float a = float((stats.gammaRamp[first] >> shift) & 1023u);
+    float b = float((stats.gammaRamp[min(first + 1u, 255u)] >> shift) & 1023u);
+    return mix(a, b, fract(position)) / 1023.0;
+}
+
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(presentation);
+    if (any(greaterThanEqual(p, size))) return;
+    vec2 uv = (vec2(p) + 0.5) / vec2(size);
+    ivec2 src = min(ivec2(uv * vec2(renderSize)), min(renderSize, frame.guestAllocation) - 1);
+    vec3 finished = texelFetch(completedGuest, src, 0).rgb;
+    if ((frame.flags & swapGuestRedBlue) != 0u) finished = finished.bgr;
+    vec3 rgb = finished;
+    bool upscalePixel = false;
+    if ((frame.flags & useUpscaled) != 0u) {
+        vec3 originalScene = imageLoad(scene, src).rgb;
+        vec3 difference = abs(finished - originalScene);
+        // Preserve the original drawn result where an overlay changed the guest pixel.
+        upscalePixel = max(max(difference.r, difference.g), difference.b) <= 2.0 / 255.0;
+        if (upscalePixel) rgb = texture(upscaledScene, uv).rgb;
+    }
+    if (all(equal(p & 7, ivec2(0)))) {
+        if (upscalePixel) atomicAdd(stats.sceneSamples, 1u);
+        else if ((frame.flags & useUpscaled) != 0u) atomicAdd(stats.overlaySamples, 1u);
+        else atomicAdd(stats.fallbackSamples, 1u);
+    }
+    imageStore(presentation, p, vec4(applyGamma(rgb.r, 0u), applyGamma(rgb.g, 10u),
+                                     applyGamma(rgb.b, 20u), 1));
+}
+#endif
+
+#if defined(HISTORY)
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(p, renderSize))) return;
+    imageStore(previousScene, p, imageLoad(scene, p));
+}
+#endif

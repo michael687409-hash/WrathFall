@@ -76,7 +76,8 @@ function Invoke-Program([string] $Program, [string[]] $Arguments) {
     if ($LASTEXITCODE -ne 0) { throw "$Program exited with code $LASTEXITCODE." }
 }
 
-function Watch-GameplayCollector([Diagnostics.Process] $GameProcess, [string] $LogDirectory) {
+function Watch-GameplayCollector([Diagnostics.Process] $GameProcess, [string] $LogDirectory,
+                                 [string] $GraphicsApi, [string] $Provider) {
     $collectorExe = Join-Path $out 'build\win-amd64\Release\asura_gameplay_collector.exe'
     if (!(Test-Path -LiteralPath $collectorExe -PathType Leaf)) {
         throw 'Use Build PC version to install the collector.'
@@ -93,7 +94,7 @@ function Watch-GameplayCollector([Diagnostics.Process] $GameProcess, [string] $L
     $stamp = Get-Date -Format 'yyyyMMdd-HHmmss-fff'
     $log = Join-Path $LogDirectory "gameplay-collector-$stamp-$($GameProcess.Id).log"
     $errorLog = [IO.Path]::ChangeExtension($log, '.err.log')
-    $arguments = @(('"{0}"' -f $PSScriptRoot), $GameProcess.Id, $window.ToInt64())
+    $arguments = @(('"{0}"' -f $PSScriptRoot), $GameProcess.Id, $window.ToInt64(), $GraphicsApi, $Provider)
     $collector = Start-Process -FilePath $collectorExe -ArgumentList $arguments -WindowStyle Hidden -PassThru `
         -RedirectStandardOutput $log -RedirectStandardError $errorLog
     Write-Output "Collector log: $log"
@@ -140,23 +141,32 @@ try {
 
     if ($Stage -in 'Run', 'PrepareShaders') {
         $prepare = $Stage -eq 'PrepareShaders'
+        $vulkanTemporal = !$prepare -and $Renderer -eq 'vulkan' -and $Upscaler -ne 'native'
         # The Vulkan and D3D12 shader archives use the same filename with incompatible versions.
         $cacheRoot = Join-Path $out 'cache'
         if ($Renderer -eq 'vulkan') { $cacheRoot = Join-Path $cacheRoot 'vulkan' }
         $exe = Join-Path $out 'build\win-amd64\Release\asuras_wrath.exe'
         if (!(Test-Path -LiteralPath $exe -PathType Leaf)) { throw "Build the executable first. Missing $exe." }
-        if ($Upscaler -ne 'native') {
+        if ($Upscaler -ne 'native' -and (!$prepare -or $Renderer -eq 'd3d12')) {
             $upscalerName = if ($Upscaler -eq 'fsr3') { 'FSR 3' } else { 'DLSS' }
-            if ($Renderer -ne 'd3d12' -or $ResolutionScale -ne 1) {
-                throw "$upscalerName requires Direct3D 12 and 720p internal resolution."
+            if ($ResolutionScale -ne 1) { throw "$upscalerName requires 720p internal resolution." }
+            if ($vulkanTemporal -and $OutputResolution -ne '2560x1440') {
+                throw 'Experimental Vulkan upscaling requires 2560 × 1440 output.'
             }
-            $temporalDll = Join-Path $PSScriptRoot 'runtime\upscalers\rexgpu-xenos-d3d12.dll'
-            if (!(Test-Path -LiteralPath $temporalDll -PathType Leaf)) {
-                $temporalDll = Join-Path $out 'dlss-runtime\rexgpu-xenos-d3d12.dll'
+            if ($vulkanTemporal) {
+                $temporalDll = Join-Path $out 'vulkan-upscalers\rexgpu-xenos-vulkan.dll'
+                $temporalGame = Join-Path $out 'vulkan-upscalers\game'
+            } else {
+                $temporalDll = Join-Path $PSScriptRoot 'runtime\upscalers\rexgpu-xenos-d3d12.dll'
+                if (!(Test-Path -LiteralPath $temporalDll -PathType Leaf)) {
+                    $temporalDll = Join-Path $out 'dlss-runtime\rexgpu-xenos-d3d12.dll'
+                }
+                $temporalGame = Join-Path $out 'dlss-runtime\game'
             }
             if ($Upscaler -eq 'fsr3') {
                 $vendorRoot = Join-Path $PSScriptRoot '.tools\renderer-deps\fsr-2.4.0\FidelityFX-SDK-2.4.0\Kits\FidelityFX\signedbin'
-                $vendorDlls = 'amd_fidelityfx_loader_dx12.dll', 'amd_fidelityfx_upscaler_dx12.dll'
+                $backend = if ($vulkanTemporal) { 'vk' } else { 'dx12' }
+                $vendorDlls = "amd_fidelityfx_loader_$backend.dll", "amd_fidelityfx_upscaler_$backend.dll"
             } else {
                 $vendorRoot = Join-Path $PSScriptRoot '.tools\renderer-deps\streamline-2.14.16\bin\x64'
                 $vendorDlls = 'sl.interposer.dll', 'sl.common.dll', 'sl.pcl.dll', 'sl.dlss.dll', 'nvngx_dlss.dll'
@@ -168,18 +178,18 @@ try {
                 $missingVendor) {
                 throw "The $upscalerName renderer or vendor runtime is missing."
             }
-            $temporalGame = Join-Path $out 'dlss-runtime\game'
             $null = New-Item -ItemType Directory -Path $temporalGame -Force
+            $moduleName = Split-Path -Leaf $temporalDll
             Get-ChildItem -LiteralPath (Split-Path -Parent $exe) -Filter '*.dll' -File |
-                Where-Object Name -ne 'rexgpu-xenos-d3d12.dll' |
+                Where-Object Name -ne $moduleName |
                 Copy-Item -Destination $temporalGame -Force
             Copy-Item -LiteralPath $exe, $temporalDll -Destination $temporalGame -Force
             $exe = Join-Path $temporalGame 'asuras_wrath.exe'
         }
         $logRoot = Join-Path $out 'logs'
         if ($prepare) {
-            $cachePattern = if ($Upscaler -ne 'native') { '43430817.rtv.d3d12.xpso' }
-                elseif ($Renderer -eq 'vulkan') { '43430817.*.vk.xpso' } else { '43430817.*.d3d12.xpso' }
+            $cachePattern = if ($Renderer -eq 'vulkan') { '43430817.*.vk.xpso' }
+                elseif ($Upscaler -ne 'native') { '43430817.rtv.d3d12.xpso' } else { '43430817.*.d3d12.xpso' }
             $recorded = Get-ChildItem -LiteralPath (Join-Path $cacheRoot 'shaders\shareable') -File `
                 -Filter $cachePattern `
                 -ErrorAction SilentlyContinue | Where-Object Length -GT 32
@@ -211,7 +221,7 @@ try {
             '--gpu.xenos.store_shaders=true',
             '--gpu.xenos.async_shader_compilation=false'
         )
-        if ($Upscaler -ne 'native') { $arguments += '--gpu.d3d12.render_target_path=rtv' }
+        if ($Renderer -eq 'd3d12' -and $Upscaler -ne 'native') { $arguments += '--gpu.d3d12.render_target_path=rtv' }
         if ($Renderer -eq 'vulkan') { $arguments += '--gpu.vulkan.render_target_path=fsi' }
         if (!$prepare -and $OutputResolution) {
             $arguments += "--ui.resolution=$OutputResolution",
@@ -253,7 +263,7 @@ try {
                 $arguments += "--ui.video_mode_refresh_rate=$FrameRate"
             }
             if (!$prepare -and $Upscaler -ne 'native') {
-                $upscalerLog = Join-Path $logRoot ($Upscaler + '-' + (Get-Date -Format 'yyyyMMdd-HHmmss-fff'))
+                $upscalerLog = Join-Path $logRoot ($Renderer + '-' + $Upscaler + '-' + (Get-Date -Format 'yyyyMMdd-HHmmss-fff'))
                 $null = New-Item -ItemType Directory -Path $upscalerLog
                 $model = if ($Upscaler -eq 'dlss') {
                     if (!$DlssPreset) { 'K' }
@@ -270,12 +280,18 @@ try {
                     ASURA_LIVE_DLSS_DIAGNOSTICS = '0'
                     ASURA_REMOVE_MOTION_BLUR = '1'
                 }
+                if ($vulkanTemporal) {
+                    $upscalerOptions.WRATHFALL_VK_TEMPORAL = $Upscaler
+                    $upscalerOptions.WRATHFALL_VK_SCENE_TRACE = Join-Path $upscalerLog 'vulkan-scene.tsv'
+                    $upscalerOptions.WRATHFALL_VK_DLSS_PROBE_RUNTIME = if ($Upscaler -eq 'dlss') { $vendorRoot } else { $null }
+                    $upscalerOptions.WRATHFALL_VK_FSR_PROBE_RUNTIME = if ($Upscaler -eq 'fsr3') { $vendorRoot } else { $null }
+                }
                 foreach ($name in $upscalerOptions.Keys) {
                     $upscalerEnvironment[$name] = [Environment]::GetEnvironmentVariable($name)
                     [Environment]::SetEnvironmentVariable($name, $upscalerOptions[$name])
                 }
                 $modelText = if ($model) { ", preset $model" } else { '' }
-                Write-Output "$upscalerName 1280x720 to 2560x1440$modelText. Log folder $upscalerLog"
+                Write-Output "$upscalerName on $Renderer, 1280x720 to 2560x1440$modelText. Log folder $upscalerLog"
             }
             $start = @{ FilePath=$exe; ArgumentList=$arguments; PassThru=$true }
             if ($prepare) { $start.WindowStyle = 'Hidden' }
@@ -292,12 +308,17 @@ try {
         if (!$prepare -and $SkipGameplayCollector) {
             Write-Output 'Gameplay collector disabled.'
         } elseif (!$prepare) {
-            try { Watch-GameplayCollector $process $logRoot }
+            try { Watch-GameplayCollector $process $logRoot $Renderer $Upscaler }
             catch { Write-Output "Gameplay collector unavailable. $($_.Exception.Message)" }
         }
         $process.WaitForExit()
         if ($process.ExitCode -ne 0) { throw "$Stage exited with code $($process.ExitCode). See $logRoot." }
-        if ($upscalerLog) {
+        if ($upscalerLog -and $vulkanTemporal) {
+            $trace = Join-Path $upscalerLog 'vulkan-scene.tsv'
+            if (!(Test-Path -LiteralPath $trace)) { throw "Experimental $upscalerName did not start. See $upscalerLog." }
+            $failure = Select-String -LiteralPath $trace -Pattern '^(dlss-(instance|context)-error|fsr-context-error|temporal-init-error|upscale-error)\t' | Select-Object -Last 1
+            if ($failure) { throw "Experimental $upscalerName reported an error. See $upscalerLog." }
+        } elseif ($upscalerLog) {
             $upscalerError = Join-Path $upscalerLog 'live-temporal-error.txt'
             $upscalerTrace = Join-Path $upscalerLog 'live-temporal.tsv'
             if (Test-Path -LiteralPath $upscalerError) {
