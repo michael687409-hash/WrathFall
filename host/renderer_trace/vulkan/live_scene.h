@@ -38,6 +38,8 @@ bool Draw(uint64_t frame, uint64_t vertex, uint64_t pixel, uint32_t width, uint3
           const std::array<float, 16>& camera, float near_depth, float far_depth,
           uint32_t color_format, uint32_t pitch_pixels, uint32_t samples);
 bool NeedsColorBeforeResolve(uint64_t frame);
+bool SuppressMotionBlur(uint64_t frame);
+void MarkMotionBlurSuppressed(uint64_t frame);
 void CopyInterlockInput(rex::gpu::vulkan::VulkanCommandProcessor& processor, uint64_t frame,
                         VkBuffer edram, bool depth);
 std::array<float, 2> Jitter(uint64_t frame);

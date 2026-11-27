@@ -79,7 +79,7 @@ namespace AsurasWrath.Launcher
                 try { snapshot = project.ShaderPreparationSnapshot(renderer, temporal); }
                 catch (Exception error) { Console.WriteLine("Could not verify shader preparation inputs. " + error.Message); }
 
-                string executable = needsAlternateRenderer ? StageRenderer(project, false) : project.GameExecutable;
+                string executable = SelectRuntime(project, vulkan, temporal);
                 string user = Path.Combine(project.Output, "shader-preparation", "user");
                 string logs = Path.Combine(project.Logs, "shader-preparation");
                 Directory.CreateDirectory(logs);
@@ -141,7 +141,7 @@ namespace AsurasWrath.Launcher
             VerifyInstallation(project);
 
             bool traceVulkan = vulkan && settings.GameplayCollectorEnabled && project.HasExperimentalVulkan;
-            string executable = temporal || traceVulkan ? StageRenderer(project, vulkan) : project.GameExecutable;
+            string executable = SelectRuntime(project, vulkan, temporal);
             string user = GameLaunchInputs.PreparePlayerData(project);
             Console.WriteLine("Using the save folder at " + user);
             string cache = Path.Combine(project.Output, "cache");
@@ -258,6 +258,12 @@ namespace AsurasWrath.Launcher
                 !new[] { 0, 30, 60, 120, 144 }.Contains(settings.FrameRate) ||
                 settings.TextureFiltering < -1 || settings.TextureFiltering > 5)
                 throw new ArgumentException("One or more game launch settings are invalid.");
+        }
+
+        private static string SelectRuntime(Project project, bool vulkan, bool temporal)
+        {
+            bool alternate = vulkan ? project.HasExperimentalVulkan : temporal;
+            return alternate ? StageRenderer(project, vulkan) : project.GameExecutable;
         }
 
         private static string StageRenderer(Project project, bool vulkan)

@@ -38,6 +38,7 @@ struct SceneEvidence {
   bool host_depth_image = false;
   bool depth_resolved = false;
   bool camera_found = false;
+  bool blur_neutralized = false;
   float near_depth = 0;
   float far_depth = 0;
   std::array<float, 16> camera{};
@@ -357,6 +358,15 @@ bool NeedsColorBeforeResolve(uint64_t frame) {
       info.color_format == 0 && info.color_pitch_pixels == 1280 && info.color_samples == 1;
 }
 
+bool SuppressMotionBlur(uint64_t frame) {
+  static const bool requested = EnvironmentPath(L"ASURA_REMOVE_MOTION_BLUR").native() == L"1";
+  return requested && TemporalRequested() && Evidence(frame).motion_draws != 0;
+}
+
+void MarkMotionBlurSuppressed(uint64_t frame) {
+  Evidence(frame).blur_neutralized = true;
+}
+
 void CopyInterlockInput(rex::gpu::vulkan::VulkanCommandProcessor& processor, uint64_t frame,
                         VkBuffer edram, bool depth) {
   using namespace rex::gpu::vulkan;
@@ -521,6 +531,7 @@ void Present(uint64_t frame, uint32_t frontbuffer, uint32_t width, uint32_t heig
       << "\tdepth=" << evidence.depth_resolved << "\thost_depth_image=" << evidence.host_depth_image
       << "\tsamples=" << evidence.depth_samples << "\tworld=" << evidence.world_draws
       << "\tmotion=" << evidence.motion_draws << "\tcamera=" << evidence.camera_found
+      << "\tmotion_blur_neutralized=" << evidence.blur_neutralized
       << "\thud=" << evidence.screen_draws << "\tblend=" << evidence.hud_blends
       << "\tstencil=" << evidence.stencil_draws;
   if (evidence.compositor) {

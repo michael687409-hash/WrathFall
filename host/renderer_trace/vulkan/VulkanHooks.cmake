@@ -277,6 +277,37 @@ set(hook [=[
                                               edram_buffer_, false);
   }
 
+  const auto& blur_layout = resolve_info.color_edram_info;
+  const auto& blur_region = resolve_info.coordinate_info;
+  if (!draw_resolution_scaled && GetPath() == Path::kPixelShaderInterlock &&
+      !resolve_info.IsCopyingDepth() && resolve_info.copy_dest_extent_length &&
+      resolve_info.color_original_base == 1624 && blur_layout.base_tiles == 1624 &&
+      resolve_info.copy_dest_base == 0x13980000 && blur_region.width_div_8 == 80 &&
+      resolve_info.height_div_8 == 45 && !blur_region.edram_offset_x_div_8 &&
+      !blur_region.edram_offset_y_div_8 && blur_layout.pitch_tiles >= 8 &&
+      blur_layout.msaa_samples == xenos::MSAASamples::k1X && !blur_layout.format_is_64bpp &&
+      blur_layout.format == static_cast<u32>(xenos::ColorRenderTargetFormat::k_8_8_8_8) &&
+      wrathfall::vulkan_live::SuppressMotionBlur(command_processor_.GetCurrentFrame())) {
+    // Keep the velocity draws used to recognize temporal scenes. Neutralize only the
+    // original blur resolve rectangle, matching the 0.5, 0.5 RG value used on D3D12.
+    UseEDRAMBuffer(EDRAMBufferUsage::kComputeWrite);
+    CommitEDRAMBufferShaderWrites();
+    command_processor_.BindExternalComputePipeline(resolve_fsi_clear_32bpp_pipeline_);
+    command_buffer.CmdVkBindDescriptorSets(VK_PIPELINE_BIND_POINT_COMPUTE,
+        resolve_fsi_clear_pipeline_layout_, 0, 1, &edram_storage_buffer_descriptor_set_, 0, nullptr);
+    draw_state::ResolveClearShaderConstants constants{};
+    constants.coordinate_info = blur_region;
+    constants.rt_specific.edram_info = blur_layout;
+    constants.rt_specific.clear_value[0] = 0x00008080;
+    command_buffer.CmdVkPushConstants(resolve_fsi_clear_pipeline_layout_, VK_SHADER_STAGE_COMPUTE_BIT,
+        0, sizeof(constants), &constants);
+    const auto groups = resolve_info.GetClearShaderGroupCount(1, 1);
+    command_processor_.SubmitBarriers(true);
+    command_buffer.CmdVkDispatch(groups.first, groups.second, 1);
+    MarkEDRAMBufferModified();
+    wrathfall::vulkan_live::MarkMotionBlurSuppressed(command_processor_.GetCurrentFrame());
+  }
+
   bool copied = false;
   if (resolve_info.copy_dest_extent_length) {]=])
 replace_hook(render_target_cache "${anchor}" "${hook}")
