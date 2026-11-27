@@ -217,6 +217,7 @@
         <StackPanel DockPanel.Dock="Bottom">
           <Button x:Name="ProjectFolder" Content="Project folder" Style="{StaticResource Navigation}"/>
           <Button x:Name="OpenLogs" Content="Logs" Style="{StaticResource Navigation}"/>
+          <Button x:Name="FrameReport" Content="Frame report" Style="{StaticResource Navigation}"/>
         </StackPanel>
         <StackPanel>
           <Button x:Name="NavPlay" Content="Play" Style="{StaticResource Navigation}"/>

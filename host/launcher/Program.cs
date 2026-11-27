@@ -27,7 +27,7 @@ namespace AsurasWrath.Launcher
             string command = args.Length == 0 ? null : args[0];
             bool projectTool = ProjectTools.Handles(command);
             bool worker = projectTool || command == GameLaunch.WorkerCommand || command == GameLaunch.ShaderWorkerCommand ||
-                command == GameImport.WorkerCommand || command == GameLaunch.CollectCommand;
+                command == GameImport.WorkerCommand || command == GameLaunch.CollectCommand || command == FrameReport.Command;
             var stdout = GetStdHandle(-11);
             if (worker && (stdout == IntPtr.Zero || stdout == new IntPtr(-1))) AttachConsole(uint.MaxValue);
             try
@@ -43,6 +43,7 @@ namespace AsurasWrath.Launcher
                 if (command == GameLaunch.ShaderWorkerCommand) return GameLaunch.PrepareShaders(project, args);
                 if (command == GameImport.WorkerCommand) return GameImport.Run(project, args);
                 if (command == GameLaunch.CollectCommand) return GameLaunch.Collect(project);
+                if (command == FrameReport.Command) return FrameReport.Run(project, args);
                 return new Application().Run(new LauncherWindow(project).Window);
             }
             catch (Exception error)
@@ -64,7 +65,7 @@ namespace AsurasWrath.Launcher
         private static readonly string[] ComboNames = { "Renderer", "Resolution", "DisplayMode", "DisplayMonitor", "FrameRate",
             "Upscaler", "DlssPreset", "AntiAliasing", "TextureFiltering" };
         private static readonly string[] CheckNames = { "VSync", "Collector" };
-        private static readonly string[] JobButtons = { "ChooseDisc", "ChooseUpdate", "ChooseDlc" };
+        private static readonly string[] JobButtons = { "ChooseDisc", "ChooseUpdate", "ChooseDlc", "FrameReport" };
         private readonly Project project;
         private readonly DlssNrPassPreview[] nrPasses = new DlssNrPassPreview[30];
         private bool TemporalAvailable { get { return !string.IsNullOrEmpty(Selected("Upscaler")); } }
@@ -150,6 +151,11 @@ namespace AsurasWrath.Launcher
             On("GoSetup", delegate { Navigate("Setup"); });
             On("ProjectFolder", delegate { OpenFolder(project.Root); });
             On("OpenLogs", delegate { OpenFolder(project.Logs); });
+            On("FrameReport", delegate
+            {
+                if (job == null) BeginJob(BackgroundJob.StartWorker(project, "Reading frame report",
+                    new[] { FrameReport.Command, "--open" }));
+            });
             On("ChooseDisc", delegate { Choose("Disc", "Importing disc", "Xbox 360 disc images (*.iso;*.7z)|*.iso;*.7z", false); });
             On("ChooseUpdate", delegate { Choose("Update", "Importing TU1", "Title updates (*.zip;*.xexp)|*.zip;*.xexp|All files|*.*", false); });
             On("ChooseDlc", delegate { Choose("Dlc", "Importing DLC", "DLC archives (*.zip)|*.zip|Raw Xbox content packages|*.*", true); });

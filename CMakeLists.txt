@@ -51,6 +51,11 @@ target_link_libraries(guest_layout_check PRIVATE rex::sdk)
 add_subdirectory(host/console_ui)
 
 if (WIN32)
+  # Player packages include the compiled launcher and its game icon.
+  if(CMAKE_HOST_WIN32 AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/host/launcher/CMakeLists.txt")
+    add_subdirectory(host/launcher)
+  endif()
+
   add_executable(asura_gameplay_collector host/gameplay_collector.cpp)
   target_compile_definitions(asura_gameplay_collector PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
   target_link_libraries(asura_gameplay_collector PRIVATE d3d11 dxgi windowsapp windowscodecs ole32 user32)

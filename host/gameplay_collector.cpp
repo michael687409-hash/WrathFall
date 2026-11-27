@@ -713,6 +713,7 @@ struct Mark {
   std::vector<Snapshot> frames;
   std::vector<FrameTiming> timings;
   PacingIssue pacing;
+  int64_t qpc = 0;
 };
 
 class MarkKey {
@@ -724,10 +725,10 @@ class MarkKey {
   }
   ~MarkKey() { UnhookWindowsHookEx(hook_); }
 
-  bool TakeMark() {
+  int64_t TakeMark() {
     MSG message{};
     while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) DispatchMessageW(&message);
-    return std::exchange(marked_, false);
+    return std::exchange(marked_, 0);
   }
 
  private:
@@ -738,7 +739,7 @@ class MarkKey {
       } else if (GetForegroundWindow() == game_ && !held_ &&
                  (event == WM_KEYDOWN || event == WM_SYSKEYDOWN)) {
         held_ = true;
-        marked_ = true;
+        marked_ = asura::frame_clock::Now100ns();
       }
     }
     return CallNextHookEx(nullptr, code, event, input);
@@ -747,7 +748,7 @@ class MarkKey {
   HHOOK hook_ = nullptr;
   inline static HWND game_ = nullptr;
   inline static bool held_ = false;
-  inline static bool marked_ = false;
+  inline static int64_t marked_ = 0;
 };
 
 void SaveMark(ScreenshotWriter& screenshots, const fs::path& project, const fs::path& session,
@@ -764,6 +765,7 @@ void SaveMark(ScreenshotWriter& screenshots, const fs::path& project, const fs::
        << "\nsharpness_ratio=" << mark.findings.sharpness
        << "\nedge_samples=" << mark.findings.edge_samples
        << "\nghost_trail_tiles=" << mark.findings.ghost_tiles << "\n";
+  if (mark.qpc > 0) info << "mark_qpc_100ns=" << mark.qpc << '\n';
   if (!mark.timings.empty()) {
     info << "frame_timing_source=windows_graphics_capture_compositor\n";
     std::ofstream timings(output / "frame-times.csv");
@@ -989,10 +991,10 @@ void Collect(const fs::path& project, DWORD pid, HWND window, HANDLE process, bo
   auto next_blur = next_visual, next_ghost = next_visual;
   auto next_stutter = next_visual;
   auto next_drop = next_visual;
-  const auto mark = [&](const char* reason, int64_t time, DWORD code = 0, PacingIssue issue = {}) {
+  const auto mark = [&](const char* reason, int64_t time, DWORD code = 0, PacingIssue issue = {}, int64_t qpc = 0) {
     const auto& timings = pacing.history();
     marks.push_back({reason, time, code, Clock::now() + 1600ms, last,
-                     {ring.begin(), ring.end()}, {timings.begin(), timings.end()}, issue});
+                     {ring.begin(), ring.end()}, {timings.begin(), timings.end()}, issue, qpc});
   };
   const auto read_capture = [&](bool active) {
     const auto now = Clock::now();
@@ -1042,7 +1044,7 @@ void Collect(const fs::path& project, DWORD pid, HWND window, HANDLE process, bo
       if (!issue.reason) continue;
       auto& next = std::string_view(issue.reason) == "possible-frame-stutter" ? next_stutter : next_drop;
       if (now >= next) {
-        mark(issue.reason, sample->time, 0, issue);
+        mark(issue.reason, sample->time, 0, issue, sample->compositor_time);
         ++automatic_timing;
         next = now + 15s;
       }
@@ -1057,8 +1059,8 @@ void Collect(const fs::path& project, DWORD pid, HWND window, HANDLE process, bo
       if (!IsWindow(window) || WaitForSingleObject(process, 250) == WAIT_OBJECT_0) break;
       throw;
     }
-    if (hotkey.TakeMark()) {
-      mark("manual", EpochMilliseconds());
+    if (const auto stamp = hotkey.TakeMark()) {
+      mark("manual", EpochMilliseconds(), 0, {}, stamp);
       recorder.RequestSnapshot();
     }
     if (now >= next_fallback_read) {
@@ -1250,7 +1252,8 @@ void SelfTest(const fs::path& output) {
     throw std::runtime_error("Could not queue full-resolution screenshot.");
   }
   Mark test{"manual", frame.time, 0, Clock::now(), Inspect(frame),
-            {std::make_shared<Frame>(std::move(frame))}, {{frame.time, 75.0}}, hitch};
+            {std::make_shared<Frame>(std::move(frame))}, {{frame.time, 75.0}}, hitch,
+            asura::frame_clock::Now100ns()};
   SaveMark(screenshots, output, output, test, 1, 0);
 
   events::SceneEvidence scene{};
@@ -1311,6 +1314,8 @@ void SelfTest(const fs::path& output) {
     return std::string(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
   };
   if (written != 3 || !fs::is_regular_file(first_report / "screenshot.png") ||
+      read_file(output / "1-manual" / "event.txt").find("mark_qpc_100ns=" + std::to_string(test.qpc)) ==
+          std::string::npos ||
       read_file(first_report / "event.txt").find("last_frame=141") == std::string::npos ||
       read_file(first_report / "upscaler-details.tsv").find("missing-scene-color\t15\t16") ==
           std::string::npos ||
@@ -1330,7 +1335,7 @@ int wmain(int argc, wchar_t** argv) {
       SelfTest(argv[2]);
       return 0;
     }
-    if (argc != 4 && argc != 6) throw std::runtime_error("Open the game and run Collect-Gameplay.cmd.");
+    if (argc != 4 && argc != 6) throw std::runtime_error("Enable Gameplay collector in the WrathFall launcher.");
     Graphics graphics;
     if (argc == 6) {
       const std::wstring_view renderer(argv[4]), provider(argv[5]);

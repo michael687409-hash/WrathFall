@@ -44,10 +44,16 @@ The target is Xbox 360 title ID `43430817` and media ID `11DFADD6`. TU1 updates 
 
 The build uses the pinned ReXGlue SDK 0.11.0 and portable Clang 20.1.8 in `.tools/`. The custom Xbox prompt builds against the matching SDK sources in `.tools/rexglue-sdk-0.11.0/`. Generated code, imported game files, user data, and build output are git-ignored.
 
-From the source directory, use Command Prompt to compile the launcher, build the PC version, or regenerate the C++.
+From the source directory, configure and build the launcher with CMake. This creates `WrathFall.exe` beside the project manifest and works before you import game files. The full project build also provides the `wrathfall_launcher` target.
+
+```text
+cmake -S host/launcher -B out/build/launcher -G Ninja
+cmake --build out/build/launcher --target wrathfall_launcher
+```
+
+After importing the game files, you can also build or regenerate the C++ from Command Prompt.
 
 ```batch
-host\launcher\Build-Launcher.cmd
 start "" /wait WrathFall.exe --build
 start "" /wait WrathFall.exe --codegen
 ```
